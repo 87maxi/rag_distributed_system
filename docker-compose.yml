@@ -77,7 +77,7 @@ services:
   # ==================== RAG API (Puente para Cline/VS Code) ====================
   rag-api:
     build:
-      context: ./services/api
+      context: ./services
       dockerfile: Dockerfile.api
     container_name: rag_api
     restart: unless-stopped

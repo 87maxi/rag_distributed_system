@@ -4,12 +4,12 @@ FROM python:3.10-slim
 WORKDIR /app
 
 # Instalar dependencias
-RUN pip install fastapi uvicorn requests qdrant-client
+RUN pip install fastapi uvicorn requests qdrant-client redis
 
 # Copiar scripts
-COPY scripts/ ./scripts/
+COPY ./scripts ./scripts/
 
 # Copiar main.py
-COPY main.py .
+COPY /api/main.py .
 
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "5000"]

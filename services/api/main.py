@@ -15,7 +15,7 @@ app = FastAPI(title="RAG Distributed API Gateway")  # ← ESTA LÍNEA ES CLAVE
 config = RAGConfig(
     qdrant_host=os.getenv("QDRANT_HOST", "qdrant"),
     ollama_host=os.getenv("OLLAMA_HOST", "ollama-embeddings"),
-    llm_host=os.getenv("LLAMA_PRINCIPAL_IP", "192.168.1.50"),
+    llm_host=os.getenv("LLAMA_PRINCIPAL_IP", "192.168.0.50"),
     llm_port=int(os.getenv("LLAMA_PRINCIPAL_PORT", 8080))
 )
 
