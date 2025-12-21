@@ -38,6 +38,10 @@ class SmartIndexer(FileSystemEventHandler):
             'node_modules', '.next', 'build', 'dist', 
             '.git', 'artifacts', 'cache', 'typechain-types'
         }
+
+        # 🔒 Límites para evitar errores de contexto en Ollama
+        self.MAX_FILE_SIZE_BYTES = 500_000    # 500 KB
+        self.MAX_CONTENT_CHARS = 100_000      # ~25k tokens estimados (seguro para nomic 8k)
         
         self.stats = {"indexed": 0, "failed": 0, "skipped": 0}
         self._ensure_collection()
@@ -46,6 +50,7 @@ class SmartIndexer(FileSystemEventHandler):
         print(f"📁 Extensiones: {', '.join(self.extensions)}")
         print(f"🔗 Ollama URL: {self.ollama_url}")
         print(f"📡 Qdrant: {qdrant_host}:{qdrant_port}")
+        print(f"✂️ Límite: {self.MAX_FILE_SIZE_BYTES/1000:.0f} KB de tamaño, {self.MAX_CONTENT_CHARS} chars de contenido")
 
     def _ensure_collection(self):
         """Crea la colección en Qdrant si no existe (768 dims para Nomic)"""
@@ -70,13 +75,12 @@ class SmartIndexer(FileSystemEventHandler):
                 self.ollama_url,
                 json={
                     "model": "nomic-embed-text",
-                    "prompt": prefix + text  # ✅ "prompt", no "input"
+                    "prompt": prefix + text
                 },
                 timeout=30
             )
             response.raise_for_status()
             data = response.json()
-            # ✅ Clave CORRECTA: "embedding" (singular)
             return data["embedding"]
         except Exception as e:
             print(f"❌ Error en Ollama al procesar texto: {str(e)}")
@@ -94,12 +98,28 @@ class SmartIndexer(FileSystemEventHandler):
         if any(part in self.ignore_dirs for part in filepath.parts):
             return
 
+        # 🔒 1. Saltar archivos demasiado grandes
+        try:
+            file_size = filepath.stat().st_size
+            if file_size > self.MAX_FILE_SIZE_BYTES:
+                print(f"⏭️ Saltando archivo muy grande ({file_size/1000:.0f} KB): {filepath.name}")
+                self.stats["skipped"] += 1
+                return
+        except OSError as e:
+            print(f"⚠️ No se pudo leer tamaño de {filepath}: {e}")
+            return
+
         try:
             with open(filepath, 'r', encoding='utf-8') as f:
                 content = f.read()
             
             if not content.strip():
                 return
+
+            # 🔒 2. Truncar contenido extremadamente largo
+            if len(content) > self.MAX_CONTENT_CHARS:
+                print(f"✂️ Truncando contenido largo ({len(content)} chars → {self.MAX_CONTENT_CHARS}): {filepath.name}")
+                content = content[:self.MAX_CONTENT_CHARS]
 
             # Generar ID único basado en la ruta
             file_id = hashlib.md5(str(filepath).encode()).hexdigest()
@@ -146,6 +166,9 @@ class SmartIndexer(FileSystemEventHandler):
             self.stats["indexed"] += 1
             print(f"✅ Insertado: {filepath.name}")
 
+        except UnicodeDecodeError:
+            print(f"⏭️ Saltando archivo no decodificable (binario?): {filepath}")
+            self.stats["skipped"] += 1
         except Exception as e:
             print(f"⚠️ Error procesando {filepath}: {e}")
             self.stats["failed"] += 1
