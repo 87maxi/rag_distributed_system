@@ -1,0 +1,113 @@
+
+# Variables de entorno comunes
+x-environment: &common-environment
+  LLAMA_PRINCIPAL_IP: ${LLAMA_PRINCIPAL_IP:-192.168.0.50}
+  LLAMA_PRINCIPAL_PORT: ${LLAMA_PRINCIPAL_PORT:-8080}
+  CLIENT_IP: ${CLIENT_IP:-192.168.0.100}
+  NFS_MOUNT_PATH: ${NFS_MOUNT_PATH:-/data/proyectos}
+  EMBEDDING_MODEL: ${EMBEDDING_MODEL:-nomic-embed-text}
+
+services:
+  # ==================== QDRANT (Base de Datos Vectorial) ====================
+  qdrant:
+    image: qdrant/qdrant:v1.9.7 
+    container_name: rag_qdrant
+    restart: unless-stopped
+    ports:
+      - "6333:6333"
+    volumes:
+      - qdrant_storage:/qdrant/storage
+      - ./config/qdrant/config.yaml:/qdrant/config/config.yaml:ro
+
+  # ==================== OLLAMA (Solo para Embeddings en CPU) ====================
+  ollama-embeddings:
+    image: ollama/ollama:latest
+    container_name: rag_ollama
+    restart: unless-stopped
+    ports:
+      - "11434:11434"
+    volumes:
+      - ./data/ollama_storage:/root/.ollama
+    environment:
+      - OLLAMA_KEEP_ALIVE=24h
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 15s
+      timeout: 10s
+      retries: 3
+
+  # ==================== REDIS (Cache de Contexto) ====================
+  redis:
+    image: redis:alpine
+    container_name: rag_redis
+    restart: unless-stopped
+    command: redis-server /usr/local/etc/redis/redis.conf
+    volumes:
+      - ./config/redis/redis.conf:/usr/local/etc/redis/redis.conf:ro
+      - ./data/redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # ==================== INDEXER (Escaneo de código en CPU) ====================
+  indexer:
+    image: python:3.10-slim
+    container_name: rag_indexer
+    restart: unless-stopped
+    volumes:
+      - ./scripts:/app/scripts:ro
+      - ${NFS_MOUNT_PATH}:/app/code:ro
+    working_dir: /app
+    depends_on:
+      qdrant:
+        condition: service_started
+      ollama-embeddings:
+        condition: service_healthy
+    environment:
+      <<: *common-environment
+      QDRANT_HOST: qdrant
+      OLLAMA_HOST: ollama-embeddings
+      REDIS_HOST: redis
+    command: >
+      sh -c "pip install watchdog requests qdrant-client redis && 
+             python scripts/index_code.py --path /app/code"
+
+  # ==================== RAG API (Puente para Cline/VS Code) ====================
+  rag-api:
+    build:
+      context: ./services/api
+      dockerfile: Dockerfile.api
+    container_name: rag_api
+    restart: unless-stopped
+    ports:
+      - "5000:5000"
+    volumes:
+      - ./scripts:/app/scripts:ro
+    environment:
+      <<: *common-environment
+      QDRANT_HOST: qdrant
+      OLLAMA_HOST: ollama-embeddings
+      REDIS_HOST: redis
+      API_KEY: ${API_KEY}
+    depends_on:
+      qdrant:
+        condition: service_started
+      ollama-embeddings:
+        condition: service_healthy
+
+
+volumes:
+  qdrant_storage:
+  redis_data:
+  ollama_data:
+  grafana_data:
+
+
+networks:
+  rag-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16

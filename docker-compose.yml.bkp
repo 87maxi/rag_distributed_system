@@ -1,0 +1,199 @@
+
+# Variables de entorno (editar en .env)
+x-environment: &common-environment
+  LLAMA_PRINCIPAL_IP: ${LLAMA_PRINCIPAL_IP:-192.168.1.50}
+  LLAMA_PRINCIPAL_PORT: ${LLAMA_PRINCIPAL_PORT:-8080}
+  CLIENT_IP: ${CLIENT_IP:-192.168.1.100}
+  NFS_MOUNT_PATH: ${NFS_MOUNT_PATH:-/mnt/codigo_principal}
+  EMBEDDING_MODEL: ${EMBEDDING_MODEL:-nomic-embed-text}
+
+services:
+  # ==================== QDRANT (Vector Database) ====================
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: rag_qdrant
+    restart: unless-stopped
+    ports:
+      - "6333:6333"   # HTTP API
+      - "6334:6334"   # gRPC API
+    volumes:
+      - ./data/qdrant_storage:/qdrant/storage
+      - ./config/qdrant/config.yaml:/qdrant/config/production.yaml:ro
+    environment:
+      QDRANT__SERVICE__GRPC_PORT: 6334
+      QDRANT__LOG_LEVEL: INFO
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:6333/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ==================== OLLAMA (Embeddings en RTX 1650) ====================
+  ollama-embeddings:
+    image: ollama/ollama:latest
+    container_name: rag_ollama
+    restart: unless-stopped
+    ports:
+      - "11435:11434"  # Puerto diferente al default
+    volumes:
+      - ./data/ollama:/root/.ollama
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      OLLAMA_NUM_PARALLEL: 2
+      OLLAMA_KEEP_ALIVE: 24h
+    command: >
+      sh -c "
+      ollama pull ${EMBEDDING_MODEL} &&
+      OLLAMA_HOST=0.0.0.0 OLLAMA_NUM_GPU=15 ollama serve
+      "
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+        limits:
+          memory: 4G
+          cpus: '2.0'
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:11435/api/tags"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ==================== REDIS (Cache Distribuido) ====================
+  redis:
+    image: redis:7-alpine
+    container_name: rag_redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - ./data/redis_data:/data
+      - ./config/redis/redis.conf:/usr/local/etc/redis/redis.conf:ro
+    command: redis-server /usr/local/etc/redis/redis.conf
+    environment:
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-}
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ==================== NGINX (Proxy/API Gateway) ====================
+  nginx:
+    image: nginx:alpine
+    container_name: rag_nginx
+    restart: unless-stopped
+    ports:
+      - "8081:80"   # API Gateway
+      - "8082:8082" # Dashboard opcional
+    volumes:
+      - ./config/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./config/nginx/sites/:/etc/nginx/sites-enabled/:ro
+    depends_on:
+      - qdrant
+      - ollama-embeddings
+      - redis
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:80/health"]
+      interval: 30s
+
+  # ==================== MONITOR (Dashboard opcional) ====================
+  monitor:
+    image: grafana/grafana:latest
+    container_name: rag_monitor
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./data/grafana:/var/lib/grafana
+      - ./config/grafana/provisioning:/etc/grafana/provisioning
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-admin}
+    depends_on:
+      - redis
+      - qdrant
+
+  # ==================== INDEXER (Servicio de indexación automática) ====================
+  indexer:
+    build:
+      context: ./services/indexer
+      dockerfile: Dockerfile.indexer
+    container_name: rag_indexer
+    restart: unless-stopped
+    volumes:
+      - ${NFS_MOUNT_PATH}:/code:ro
+      - ./scripts:/scripts:ro
+      - ./data/indexer_logs:/logs
+    environment:
+      <<: *common-environment
+      QDRANT_HOST: qdrant
+      QDRANT_PORT: 6333
+      OLLAMA_HOST: ollama-embeddings
+      REDIS_HOST: redis
+      INDEX_INTERVAL: ${INDEX_INTERVAL:-300}  # 5 minutos
+    depends_on:
+      qdrant:
+        condition: service_healthy
+      ollama-embeddings:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+        limits:
+          memory: 2G
+          cpus: '1.0'
+
+  # ==================== RAG API (API REST para VS Code) ====================
+  rag-api:
+    build:
+      context: ./services/api
+      dockerfile: Dockerfile.api
+    container_name: rag_api
+    restart: unless-stopped
+    ports:
+      - "5000:5000"
+    volumes:
+      - ./scripts:/app/scripts:ro
+    environment:
+      <<: *common-environment
+      QDRANT_HOST: qdrant
+      OLLAMA_HOST: ollama-embeddings
+      REDIS_HOST: redis
+      API_KEY: ${API_KEY:-}
+    depends_on:
+      qdrant:
+        condition: service_healthy
+      ollama-embeddings:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
+      interval: 30s
+
+volumes:
+  qdrant_storage:
+  redis_data:
+  ollama_data:
+  grafana_data:
+
+networks:
+  rag-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16
