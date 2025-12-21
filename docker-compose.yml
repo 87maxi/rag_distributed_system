@@ -16,7 +16,7 @@ services:
     ports:
       - "6333:6333"
     volumes:
-      - qdrant_storage:/qdrant/storage
+      - ./data/qdrant_storage:/qdrant/storage
       - ./config/qdrant/config.yaml:/qdrant/config/config.yaml:ro
 
   # ==================== OLLAMA (Solo para Embeddings en CPU) ====================
