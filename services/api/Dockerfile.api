@@ -1,9 +1,15 @@
+# ./services/api/Dockerfile.api
 FROM python:3.10-slim
+
 WORKDIR /app
-RUN pip install fastapi uvicorn requests qdrant-client redis pydantic watchdog  python-dotenv
-# Copiamos el código de la API
+
+# Instalar dependencias
+RUN pip install fastapi uvicorn requests qdrant-client
+
+# Copiar scripts
+COPY scripts/ ./scripts/
+
+# Copiar main.py
 COPY main.py .
-# El PYTHONPATH ayuda a encontrar tu rag_client.py
-ENV PYTHONPATH="/app/scripts:${PYTHONPATH}"
-EXPOSE 5000
+
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "5000"]
