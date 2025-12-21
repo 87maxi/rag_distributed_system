@@ -3,3 +3,11 @@ data/qdrant_storage/**
 data/ollama_storage/**
 data/redis_data/**
 data/ollama/**
+
+
+# Pero no ignores .gitkeep
+!data/code_sync/.gitkeep
+!data/qdrant_storage/.gitkeep
+!data/ollama_storage/.gitkeep
+!data/redis_data/.gitkeep
+!data/ollama/.gitkeep
