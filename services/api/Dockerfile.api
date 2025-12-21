@@ -1,6 +1,6 @@
 FROM python:3.10-slim
 WORKDIR /app
-RUN pip install fastapi uvicorn requests qdrant-client redis pydantic
+RUN pip install fastapi uvicorn requests qdrant-client redis pydantic watchdog  python-dotenv
 # Copiamos el código de la API
 COPY main.py .
 # El PYTHONPATH ayuda a encontrar tu rag_client.py
