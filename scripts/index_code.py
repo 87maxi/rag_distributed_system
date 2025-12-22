@@ -39,7 +39,8 @@ class SmartIndexer(FileSystemEventHandler):
             'node_modules', 'target', 'build', 'dist', '.next',
             '.git', 'artifacts', 'cache', 'typechain-types',
             '__pycache__', 'venv', '.venv', 'coverage', 'public',
-            'broadcast', 'out', 'deployments'
+            'broadcast', 'out', 'deployments',
+            'test', 'tests', '__tests__' 
         }
         self.ignore_files = {
             'package-lock.json', 'yarn.lock', 'Cargo.lock',
