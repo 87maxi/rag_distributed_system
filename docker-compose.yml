@@ -76,6 +76,9 @@ services:
   indexer:
     image: python:3.10-slim
     container_name: rag_indexer
+    build:
+      context: ./indexer
+      dockerfile: Dockerfile.indexer
     restart: unless-stopped
     volumes:
       - ./scripts:/app/scripts:ro
