@@ -77,8 +77,8 @@ services:
     image: python:3.10-slim
     container_name: rag_indexer
     build:
-      context: ./indexer
-      dockerfile: Dockerfile.indexer
+      context: .
+      dockerfile: ./indexer/Dockerfile.indexer
     restart: unless-stopped
     volumes:
       - ./scripts:/app/scripts:ro
@@ -98,9 +98,6 @@ services:
       QDRANT_HOST: qdrant
       OLLAMA_HOST: ollama-embeddings
       REDIS_HOST: redis
-    command: >
-      sh -c "pip install watchdog requests qdrant-client redis && 
-             python scripts/index_code.py --path /app/code"
 
   # ==================== RAG API (Puente para Cline/VS Code) ====================
   rag-api:
