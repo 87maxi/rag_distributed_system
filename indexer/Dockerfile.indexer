@@ -1,4 +1,6 @@
 FROM python:3.10-slim
 WORKDIR /app
+
+COPY ./scripts /app
 RUN pip install watchdog requests qdrant-client redis
 CMD ["python", "/app/scripts/index_code.py", "--path", "/app/code"]
