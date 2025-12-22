@@ -171,7 +171,7 @@ class AutoProjectIndexer(FileSystemEventHandler):
             self.index_file(Path(event.src_path))
 
 def main():
-    path = os.getenv("NFS_MOUNT_PATH", "/mnt/codigo_principal")
+    path = os.getenv("INDEX_PATH", "/app/code")
     if not Path(path).exists():
         print(f"❌ Directorio no existe: {path}")
         sys.exit(1)
