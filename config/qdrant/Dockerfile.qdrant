@@ -1,4 +1,0 @@
-FROM qdrant/qdrant:v1.9.7
-USER root
-RUN apt-get update && apt-get install -y curl wget
-USER 1000

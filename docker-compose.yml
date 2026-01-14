@@ -1,141 +1,85 @@
-# Variables de entorno comunes
-x-environment: &common-environment
-  LLAMA_PRINCIPAL_IP: ${LLAMA_PRINCIPAL_IP:-192.168.0.50}
-  LLAMA_PRINCIPAL_PORT: ${LLAMA_PRINCIPAL_PORT:-8080}
-  CLIENT_IP: ${CLIENT_IP:-192.168.0.100}
-  NFS_MOUNT_PATH: ${NFS_MOUNT_PATH:-/data/proyectos}
-  EMBEDDING_MODEL: ${EMBEDDING_MODEL:-nomic-embed-text}
-
 services:
-  # ==================== QDRANT (Base de Datos Vectorial) ====================
   qdrant:
-    image: qdrant/qdrant:v1.9.7 
+    # 1. Cambiamos a la imagen con soporte para CUDA
+    image: qdrant/qdrant:gpu-nvidia-latest 
     container_name: rag_qdrant
-    restart: unless-stopped
-    ports:
-      - "6333:6333"
-      - "6334:6334" # Puerto gRPC
-    volumes:
-      - ./data/qdrant_storage:/qdrant/storage
-      - ./config/qdrant/config.yaml:/qdrant/config/config.yaml:ro
-    networks:
-      - rag-network
-
-  # ==================== OLLAMA (Embeddings) ====================
-  ollama-embeddings:
-    image: ollama/ollama:latest
-    container_name: rag_ollama
-    restart: unless-stopped
-    ports:
-      - "11434:11434"
-    volumes:
-      - ./data/ollama_storage:/root/.ollama
+    ports: 
+      - 6333:6333
+      - 6334:6334 # Recomendado exponer gRPC para mejor rendimiento
     environment:
-      - OLLAMA_KEEP_ALIVE=24h
-    networks:
-      - rag-network
+      # CRUCIAL: Debes activar explícitamente el motor de GPU en la configuración
+      - QDRANT__GPU__INDEXING=true
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ['1']
+              capabilities: [gpu]
     healthcheck:
-      test: ["CMD", "ollama", "list"]
-      interval: 15s
-      timeout: 10s
-      retries: 3
-
-  # ==================== REDIS (Cache de Contexto) ====================
-  redis:
-    image: redis:alpine
-    container_name: rag_redis
-    restart: unless-stopped
-    command: redis-server /usr/local/etc/redis/redis.conf
-    volumes:
-      - ./config/redis/redis.conf:/usr/local/etc/redis/redis.conf:ro
-      - ./data/redis_data:/data
-    networks:
-      - rag-network
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 5s
-      timeout: 3s
+      test: ["CMD", "sh", "-c", "</dev/tcp/localhost/6333"]
+      interval: 10s
+      timeout: 5s
       retries: 5
+    volumes: 
+      - ./data/qdrant:/qdrant/storage
+    networks: ["rag_network"]
 
-  # ==================== REDIS INSIGHT (Web UI para Redis) ====================
-  redis-insight:
-    image: redis/redisinsight:latest
-    container_name: rag_redis_insight
-    restart: unless-stopped
+  rag_phoenix:
+    image: arizephoenix/phoenix:nightly
+    container_name: rag_phoenix
     ports:
-      - "8001:8001"
-    volumes:
-      - redis_insight_data:/data
-    networks:
-      - rag-network
-    depends_on:
-      redis:
-        condition: service_healthy
+      - "6006:6006"
+      - "4317:4317"
+      - "4318:4318"
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import socket; s = socket.socket(); s.connect(('localhost', 6006))"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks: ["rag_network"]
 
-  # ==================== INDEXER (Escaneo de código) ====================
-  indexer:
-    image: python:3.10-slim
+  ollama:
+    build: ./ollama-local
+    restart: unless-stopped
+    container_name: rag_ollama
+    deploy:
+      resources:
+        reservations:
+          devices: [{driver: nvidia, device_ids: ['1'], capabilities: [gpu]}]
+    ports: 
+      - 11434:11434
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:11434/api/tags"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s 
+    networks: ["rag_network"]
+    
+  rag-indexer:
+    build: ./indexer
     container_name: rag_indexer
-    build:
-      context: .
-      dockerfile: ./indexer/Dockerfile.indexer
-    restart: unless-stopped
+    command: python3 -u indexer.py
     volumes:
-      - ./scripts:/app/scripts:ro
-      - ${NFS_MOUNT_PATH}:/app/code:ro
-    working_dir: /app
-    networks:
-      - rag-network
+      - /home/maxi/Documentos/source/codecrypto:/app/code
     depends_on:
+      ollama:
+        condition: service_healthy
       qdrant:
         condition: service_started
-      ollama-embeddings:
+      rag_phoenix:
         condition: service_healthy
-      redis:
-        condition: service_healthy
-    environment:
-      <<: *common-environment
-      QDRANT_HOST: qdrant
-      OLLAMA_HOST: ollama-embeddings
-      REDIS_HOST: redis
+    networks: ["rag_network"]
 
-  # ==================== RAG API (Puente para Cline/VS Code) ====================
-  rag-api:
-    build:
-      context: ./services
-      dockerfile: Dockerfile.api
-    container_name: rag_api
-    restart: unless-stopped
-    ports:
-      - "5000:5000"
-    volumes:
-      - ./scripts:/app/scripts:ro
-    networks:
-      - rag-network
-    environment:
-      <<: *common-environment
-      QDRANT_HOST: qdrant
-      OLLAMA_HOST: ollama-embeddings
-      REDIS_HOST: redis
-      API_KEY: ${API_KEY}
+  rag-mcp-server:
+    build: ./mcp-bridge
+    container_name: rag_mcp
+    command: python3 -u main.py
     depends_on:
-      qdrant:
-        condition: service_started
-      ollama-embeddings:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-
-volumes:
-  qdrant_storage:
-  redis_data:
-  ollama_data:
-  grafana_data:
-  redis_insight_data:
+      - qdrant
+    networks: ["rag_network"]
 
 networks:
-  rag-network:
+  rag_network:
     driver: bridge
-    ipam:
-      config:
-        - subnet: 172.20.0.0/16

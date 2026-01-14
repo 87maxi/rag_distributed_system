@@ -1,8 +1,7 @@
 data/code_sync/**
-data/qdrant_storage/**
-data/ollama_storage/**
-data/redis_data/**
+data/qdrant/**
 data/ollama/**
+data/redi/**
 
 
 # Pero no ignores .gitkeep

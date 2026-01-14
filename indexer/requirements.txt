@@ -1,0 +1,8 @@
+qdrant-client==1.12.1
+requests==2.32.3
+watchdog==4.0.1
+langchain-text-splitters==0.3.5
+opentelemetry-api==1.25.0
+opentelemetry-sdk==1.25.0
+opentelemetry-exporter-otlp==1.25.0
+opentelemetry-exporter-otlp-proto-http==1.25.0
