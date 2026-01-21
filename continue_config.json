@@ -1,0 +1,16 @@
+{
+  "models": [
+    {
+      "title": "Ollama (Qwen 0.5B)",
+      "provider": "ollama",
+      "model": "qwen2.5:0.5b",
+      "apiBase": "http://localhost:11434" 
+    }
+  ],
+  "mcpServers": [
+    {
+      "name": "Local RAG MCP",
+      "url": "http://localhost:8002/sse"
+    }
+  ]
+}

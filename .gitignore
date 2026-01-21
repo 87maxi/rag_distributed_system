@@ -10,3 +10,5 @@ data/redi/**
 !data/ollama_storage/.gitkeep
 !data/redis_data/.gitkeep
 !data/ollama/.gitkeep
+.aider*
+__pycache__/

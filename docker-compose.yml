@@ -1,9 +1,9 @@
 services:
   qdrant:
     # 1. Cambiamos a la imagen con soporte para CUDA
-    image: qdrant/qdrant:gpu-nvidia-latest 
+    image: qdrant/qdrant:gpu-nvidia-latest
     container_name: rag_qdrant
-    ports: 
+    ports:
       - 6333:6333
       - 6334:6334 # Recomendado exponer gRPC para mejor rendimiento
     environment:
@@ -14,14 +14,14 @@ services:
         reservations:
           devices:
             - driver: nvidia
-              device_ids: ['0']
+              device_ids: ["1"]
               capabilities: [gpu]
     healthcheck:
       test: ["CMD", "sh", "-c", "</dev/tcp/localhost/6333"]
       interval: 10s
       timeout: 5s
       retries: 5
-    volumes: 
+    volumes:
       - ./data/qdrant:/qdrant/storage
     networks: ["rag_network"]
 
@@ -33,7 +33,13 @@ services:
       - "4317:4317"
       - "4318:4318"
     healthcheck:
-      test: ["CMD", "python3", "-c", "import socket; s = socket.socket(); s.connect(('localhost', 6006))"]
+      test:
+        [
+          "CMD",
+          "python3",
+          "-c",
+          "import socket; s = socket.socket(); s.connect(('localhost', 4317))",
+        ]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -46,17 +52,17 @@ services:
     deploy:
       resources:
         reservations:
-          devices: [{driver: nvidia, device_ids: ['1'], capabilities: [gpu]}]
-    ports: 
+          devices: [{ driver: nvidia, device_ids: ["1"], capabilities: [gpu] }]
+    ports:
       - 11434:11434
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:11434/api/tags"]
       interval: 10s
       timeout: 5s
       retries: 10
-      start_period: 30s 
+      start_period: 30s
     networks: ["rag_network"]
-    
+
   rag-indexer:
     build: ./indexer
     container_name: rag_indexer
@@ -75,9 +81,21 @@ services:
   rag-mcp-server:
     build: ./mcp-bridge
     container_name: rag_mcp
+    environment:
+      - OLLAMA_HOST=http://rag_ollama:11434 # <--- ESTO ES LO QUE FALTA
+      - QDRANT_HOST=rag_qdrant # <--- TAMBIÉN AJUSTA ESTO SI ES NECESARIO
+      - PHOENIX_ENDPOINT=http://rag_phoenix:4317/v1/traces
+      #- PHOENIX_API_KEY=
     command: python3 -u main.py
     depends_on:
-      - qdrant
+      qdrant:
+        condition: service_started
+      ollama:
+        condition: service_healthy
+      rag_phoenix:
+        condition: service_healthy
+    ports:
+      - 8002:8002
     networks: ["rag_network"]
 
 networks:

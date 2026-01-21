@@ -1,48 +1,61 @@
 #!/bin/sh
 set -e
 
+# Configuración de modelos
+MODELS="nomic-embed-text:latest qwen2.5:0.5b"
+
 # Función para verificar si Ollama está listo
 check_ollama() {
     curl -s -f http://localhost:11434/api/tags > /dev/null 2>&1
     return $?
 }
 
-# Iniciar servidor
-echo "🚀 Iniciando Ollama server..."
+# Función para verificar si un modelo ya existe
+model_exists() {
+    ollama list | grep -q "$1"
+    return $?
+}
+
+echo "🚀 Iniciando Ollama server en segundo plano..."
 ollama serve > /dev/null 2>&1 &
 OLLAMA_PID=$!
 
-# Esperar con timeout
+# Esperar a que el servidor responda
 MAX_RETRIES=30
 RETRY_COUNT=0
 
 while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
     if check_ollama; then
-        echo "✅ Servidor Ollama listo en puerto 11434"
+        echo "✅ Servidor Ollama detectado."
         
-        # Hacer pull del modelo
-        echo "📥 Descargando modelo..."
-        if ollama pull nomic-embed-text:latest; then
-            echo "✅ Modelo descargado exitosamente"
-            
-            # Listar modelos disponibles
-            echo "📋 Modelos disponibles:"
-            ollama list
-            
-            # Mantener contenedor activo
-            echo "🔄 Servidor Ollama en ejecución..."
-            wait $OLLAMA_PID
-            exit 0
-        else
-            echo "❌ Error al descargar el modelo"
-            exit 1
-        fi
+        # Procesar cada modelo
+        for MODEL in $MODELS; do
+            if model_exists "$MODEL"; then
+                echo "    📦 El modelo '$MODEL' ya existe localmente. Omitiendo descarga."
+            else
+                echo "    📥 Descargando modelo '$MODEL'..."
+                if ollama pull "$MODEL"; then
+                    echo "    ✅ '$MODEL' descargado exitosamente."
+                else
+                    echo "    ❌ Error al descargar '$MODEL'."
+                    exit 1
+                fi
+            fi
+        done
+        
+        echo "📋 Resumen de modelos disponibles:"
+        ollama list
+        
+        # Mantener el proceso principal activo
+        echo "🔄 Ollama está listo y operando..."
+        wait $OLLAMA_PID
+        exit 0
     fi
     
     RETRY_COUNT=$((RETRY_COUNT + 1))
-    echo "⏳ Esperando servidor Ollama... ($RETRY_COUNT/$MAX_RETRIES)"
+    echo "⏳ Esperando a Ollama... ($RETRY_COUNT/$MAX_RETRIES)"
     sleep 2
 done
 
-echo "❌ Timeout: Ollama server no se inició en 60 segundos"
+echo "❌ Timeout: El servidor Ollama no inició a tiempo."
 exit 1
