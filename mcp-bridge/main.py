@@ -266,60 +266,65 @@ async def handle_call_tool(
         with tracer.start_as_current_span("search_code") as span:
             span.set_attribute("rag.query", query)
 
-        # PASO A: El Bibliotecario genera el resumen (Llamada al método 1)
-        summary_text = get_compressed_memory(history)
+            # PASO A: El Bibliotecario genera el resumen (Llamada al método 1)
+            summary_text = get_compressed_memory(history)
 
-        # PASO B: Búsqueda Vectorial
-        # PASO B: Búsqueda Vectorial Expandida (Phase 3)
-        variations = generate_search_variations(query)
-        span.set_attribute("rag.variations", str(variations))
-        
-        all_queries = [query] + variations
-        
-        hits_map = {}
-        for q_var in all_queries:
-            vec = get_query_vector(q_var)
-            if vec:
-                res = qdrant.search(collection_name=COLLECTION_NAME, query_vector=vec, limit=5)
-                for r in res:
-                    hits_map[r.id] = r # Deduplication by ID
-        
-        unique_results = list(hits_map.values())
-        
-        # PASO B.2: Reranking (Phase 3)
-        top_results = rerank_search_results(query, unique_results)[:4] # Top 4
-        span.set_attribute("rag.results_count", len(unique_results))
+            # PASO B: Búsqueda Vectorial
+            # PASO B: Búsqueda Vectorial Expandida (Phase 3)
+            variations = generate_search_variations(query)
+            span.set_attribute("rag.variations", str(variations))
+            
+            all_queries = [query] + variations
+            
+            hits_map = {}
+            for q_var in all_queries:
+                vec = get_query_vector(q_var)
+                if vec:
+                    res = qdrant.search(collection_name=COLLECTION_NAME, query_vector=vec, limit=5)
+                    for r in res:
+                        hits_map[r.id] = r # Deduplication by ID
+            
+            unique_results = list(hits_map.values())
+            
+            # PASO B.2: Reranking (Phase 3)
+            top_results = rerank_search_results(query, unique_results)[:4] # Top 4
+            span.set_attribute("rag.results_count", len(unique_results))
 
-        # PASO C: Formatear Contexto (Usando 'path' para coincidir con indexer.py)
-        code_snippets = []
-        # PASO C: Formatear Contexto
-        code_snippets = []
-        for res in top_results:
-            path = res.payload.get("path", "desconocido")
-            content = res.payload.get("content", "")
-            code_snippets.append(f"ARCHIVO: {path}\n```\n{content}\n```")
+            # PASO C: Formatear Contexto (Usando 'path' para coincidir con indexer.py)
+            code_snippets = []
+            # PASO C: Formatear Contexto
+            code_snippets = []
+            for res in top_results:
+                path = res.payload.get("path", "desconocido")
+                content = res.payload.get("content", "")
+                code_snippets.append(f"ARCHIVO: {path}\n```\n{content}\n```")
 
-        code_context = (
-            "\n\n".join(code_snippets) if code_snippets else "Sin resultados."
-        )
-
-        # PASO C.2: El Crítico Local (Evaluación de Suficiencia)
-        critic_prompt = (
-            f"Analiza si el siguiente contexto de código es suficiente para responder a la consulta: '{query}'. "
-            f"Contexto:\n{code_context[:2000]}...\n" # Truncar para no saturar contexto
-            f"Responde solo 'SUFFICIENT' o 'INSUFFICIENT' seguido de una explicacion de 1 linea."
-        )
-        critic_judgement = "SKIP (Error)"
-        try:
-             res_crit = requests.post(
-                f"{OLLAMA_HOST}/api/generate",
-                json={"model": LOCAL_MODEL_CRITIC, "prompt": critic_prompt, "stream": False},
-                timeout=15,
+            code_context = (
+                "\n\n".join(code_snippets) if code_snippets else "Sin resultados."
             )
-             critic_judgement = res_crit.json().get("response", "No judgment").strip()
-             log(f"Crítico Local: {critic_judgement}")
-        except Exception as e:
-            log(f"Error Crítico: {e}")
+
+            # PASO C.2: El Crítico Local (Evaluación de Suficiencia)
+            critic_prompt = (
+                f"Analiza si el siguiente contexto de código es suficiente para responder a la consulta: '{query}'. "
+                f"Contexto:\n{code_context[:2000]}...\n" # Truncar para no saturar contexto
+                f"Responde solo 'SUFFICIENT' o 'INSUFFICIENT' seguido de una explicacion de 1 linea."
+            )
+            critic_judgement = "SKIP (Error)"
+            try:
+                 res_crit = requests.post(
+                    f"{OLLAMA_HOST}/api/generate",
+                    json={"model": LOCAL_MODEL_CRITIC, "prompt": critic_prompt, "stream": False},
+                    timeout=15,
+                )
+                 res_json = res_crit.json()
+                 if "error" in res_json:
+                     log(f"Ollama Error (Critic): {res_json['error']}")
+                     critic_judgement = f"Error: {res_json['error']}"
+                 else:
+                     critic_judgement = res_json.get("response", "No judgment").strip()
+                     log(f"Crítico Local: {critic_judgement}")
+            except Exception as e:
+                log(f"Error Crítico: {e}")
 
 
         # PASO D: El "Super-Prompt" para el modelo remoto
@@ -376,7 +381,7 @@ async def logged_sse_app(scope, receive, send):
 app = Starlette(
     routes=[
         Route("/sse", endpoint=handle_sse, methods=["GET", "POST"]),
-        Mount("/messages", app=logged_sse_app),
+        Route("/messages", endpoint=logged_sse_app, methods=["POST"]),
     ],
     middleware=[
         Middleware(

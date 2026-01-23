@@ -86,7 +86,7 @@ services:
     environment:
       - OLLAMA_HOST=http://rag_ollama:11434 # <--- ESTO ES LO QUE FALTA
       - QDRANT_HOST=rag_qdrant # <--- TAMBIÉN AJUSTA ESTO SI ES NECESARIO
-      - PHOENIX_ENDPOINT=http://rag_phoenix:6006/v1/traces
+      - PHOENIX_ENDPOINT=http://rag_phoenix:4318/v1/traces
       #- PHOENIX_API_KEY=
       - PROJECT_ROOT=/app/code
     command: python3 -u main.py
