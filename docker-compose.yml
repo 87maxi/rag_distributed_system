@@ -1,5 +1,5 @@
 services:
-  qdrant:
+  rag_qdrant:
     # 1. Cambiamos a la imagen con soporte para CUDA
     image: qdrant/qdrant:gpu-nvidia-latest
     container_name: rag_qdrant
@@ -17,7 +17,7 @@ services:
               device_ids: ["1"]
               capabilities: [gpu]
     healthcheck:
-      test: ["CMD", "sh", "-c", "</dev/tcp/localhost/6333"]
+      test: ["CMD", "bash", "-c", "</dev/tcp/localhost/6333"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -38,14 +38,14 @@ services:
           "CMD",
           "python3",
           "-c",
-          "import socket; s = socket.socket(); s.connect(('localhost', 4317))",
+          "import socket; s = socket.socket(); s.connect(('localhost', 6006))",
         ]
       interval: 10s
       timeout: 5s
       retries: 5
     networks: ["rag_network"]
 
-  ollama:
+  rag_ollama:
     build: ./ollama-local
     restart: unless-stopped
     container_name: rag_ollama
@@ -66,14 +66,16 @@ services:
   rag-indexer:
     build: ./indexer
     container_name: rag_indexer
+    environment:
+      - OLLAMA_HOST=http://rag_ollama:11434
     command: python3 -u indexer.py
     volumes:
-      - /home/maxi/Documentos/source/codecrypto:/app/code
+      - /home/maxi/Documentos/source/codecrypto/practice:/app/code
     depends_on:
-      ollama:
+      rag_ollama:
         condition: service_healthy
-      qdrant:
-        condition: service_started
+      rag_qdrant:
+        condition: service_healthy
       rag_phoenix:
         condition: service_healthy
     networks: ["rag_network"]
@@ -84,13 +86,16 @@ services:
     environment:
       - OLLAMA_HOST=http://rag_ollama:11434 # <--- ESTO ES LO QUE FALTA
       - QDRANT_HOST=rag_qdrant # <--- TAMBIÉN AJUSTA ESTO SI ES NECESARIO
-      - PHOENIX_ENDPOINT=http://rag_phoenix:4317/v1/traces
+      - PHOENIX_ENDPOINT=http://rag_phoenix:6006/v1/traces
       #- PHOENIX_API_KEY=
+      - PROJECT_ROOT=/app/code
     command: python3 -u main.py
+    volumes:
+      - /home/maxi/Documentos/source/codecrypto/practice:/app/code
     depends_on:
-      qdrant:
-        condition: service_started
-      ollama:
+      rag_qdrant:
+        condition: service_healthy
+      rag_ollama:
         condition: service_healthy
       rag_phoenix:
         condition: service_healthy

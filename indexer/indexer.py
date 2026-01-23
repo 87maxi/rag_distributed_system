@@ -40,7 +40,7 @@ task_queue = queue.Queue()
 file_hashes = {}
 
 # 2. CONFIGURACIÓN
-QDRANT_HOST = os.getenv("QDRANT_HOST", "qdrant")
+QDRANT_HOST = os.getenv("QDRANT_HOST", "rag_qdrant")
 OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://rag_ollama:11434")
 INDEX_PATH = Path(os.getenv("INDEX_PATH", "/app/code"))
 COLLECTION_NAME = "code_base"
@@ -94,6 +94,16 @@ def process_file_task(file_path: Path):
         or "/." in path_str
         or "/data/" in path_str
         or "/venv/" in path_str
+        or "/dist/" in path_str
+        or "/build/" in path_str
+        or "/out/" in path_str
+        or "/.git/" in path_str
+        or "/.github/" in path_str
+        or "/.vscode/" in path_str
+        or "/.next/" in path_str
+        or "/.cache/" in path_str
+        or "/broadcast/" in path_str
+
     ):
         return
 
@@ -130,6 +140,20 @@ def process_file_task(file_path: Path):
             vector = data.get("embeddings", [None])[0] or data.get("embedding")
 
             if vector:
+                # Extraer metadatos heurísticos
+                metro_imports = []
+                metro_funcs = []
+                
+                # Heurística simple según extensión
+                if file_path.suffix == ".py":
+                    import re
+                    metro_imports = re.findall(r"^(?:from|import) .*", chunk, re.MULTILINE)
+                    metro_funcs = re.findall(r"^def .*", chunk, re.MULTILINE)
+                elif file_path.suffix in [".ts", ".tsx", ".js"]:
+                    import re
+                    metro_imports = re.findall(r"^import .*", chunk, re.MULTILINE)
+                    metro_funcs = re.findall(r"(?:function|const|let|var) \w+\s*=?\s*\(", chunk)
+
                 points.append(
                     PointStruct(
                         id=str(uuid.uuid4()),
@@ -138,6 +162,8 @@ def process_file_task(file_path: Path):
                             "path": str(file_path.relative_to(INDEX_PATH)),
                             "content": chunk,
                             "extension": file_path.suffix,
+                            "imports": metro_imports,
+                            "signatures": metro_funcs
                         },
                     )
                 )
@@ -161,10 +187,10 @@ def process_file_task(file_path: Path):
             # Upsert de nuevos puntos
             qdrant.upsert(collection_name=COLLECTION_NAME, points=points)
             file_hashes[str(file_path)] = current_hash
-            log(f"✅ Indexado: {file_path.name} ({len(points)} chunks)")
+            log(f"✅ Indexado: {file_path} ({len(points)} chunks)")
 
     except Exception as e:
-        log(f"❌ Error en {file_path.name}: {e}")
+        log(f"❌ Error en {file_path}: {e}")
 
 
 # 5. SISTEMA DE COLAS (Worker)
