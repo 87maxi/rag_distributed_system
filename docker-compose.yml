@@ -32,6 +32,9 @@ services:
       - "6006:6006"
       - "4317:4317"
       - "4318:4318"
+    environment:
+      - PHOENIX_HOST=0.0.0.0
+      - PHOENIX_GRPC_HOST=0.0.0.0
     healthcheck:
       test:
         [
@@ -43,6 +46,8 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+    volumes:
+      - ./data/phoenix:/root/.phoenix
     networks: ["rag_network"]
 
   rag_ollama:
@@ -55,6 +60,8 @@ services:
           devices: [{ driver: nvidia, device_ids: ["1"], capabilities: [gpu] }]
     ports:
       - 11434:11434
+    volumes:
+      - ./data/ollama:/root/.ollama
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:11434/api/tags"]
       interval: 10s
@@ -82,16 +89,17 @@ services:
 
   rag-mcp-server:
     build: ./mcp-bridge
-    container_name: rag_mcp
+    container_name: rag-mcp
     environment:
       - OLLAMA_HOST=http://rag_ollama:11434 # <--- ESTO ES LO QUE FALTA
       - QDRANT_HOST=rag_qdrant # <--- TAMBIÉN AJUSTA ESTO SI ES NECESARIO
-      - PHOENIX_ENDPOINT=http://rag_phoenix:4318/v1/traces
+      - PHOENIX_ENDPOINT=http://rag_phoenix:6006/v1/traces
       #- PHOENIX_API_KEY=
       - PROJECT_ROOT=/app/code
     command: python3 -u main.py
     volumes:
       - /home/maxi/Documentos/source/codecrypto/practice:/app/code
+      - ./mcp-bridge:/app/mcp-bridge
     depends_on:
       rag_qdrant:
         condition: service_healthy

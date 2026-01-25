@@ -2,7 +2,7 @@
 set -e
 
 # Configuración de modelos
-MODELS="nomic-embed-text:latest qwen2.5:0.5b"
+MODELS="nomic-embed-text:latest qwen2.5:0.5b gpt-oss:20b"
 
 # Función para verificar si Ollama está listo
 check_ollama() {
@@ -27,7 +27,7 @@ RETRY_COUNT=0
 while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
     if check_ollama; then
         echo "✅ Servidor Ollama detectado."
-        
+
         # Procesar cada modelo
         for MODEL in $MODELS; do
             if model_exists "$MODEL"; then
@@ -42,16 +42,16 @@ while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
                 fi
             fi
         done
-        
+
         echo "📋 Resumen de modelos disponibles:"
         ollama list
-        
+
         # Mantener el proceso principal activo
         echo "🔄 Ollama está listo y operando..."
         wait $OLLAMA_PID
         exit 0
     fi
-    
+
     RETRY_COUNT=$((RETRY_COUNT + 1))
     echo "⏳ Esperando a Ollama... ($RETRY_COUNT/$MAX_RETRIES)"
     sleep 2
