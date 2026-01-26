@@ -1,14 +1,20 @@
 data/code_sync/**
 data/qdrant/**
 data/ollama/**
-data/redi/**
+data/redis/**
+data/phoenix/**
+
 
 
 # Pero no ignores .gitkeep
 !data/code_sync/.gitkeep
 !data/qdrant_storage/.gitkeep
 !data/ollama_storage/.gitkeep
-!data/redis_data/.gitkeep
 !data/ollama/.gitkeep
+!data/phoenix/.gitkeep
+!data/qdrant/.gitkeep
+
+mcp-bridge/requests.log
+
 .aider*
 __pycache__/

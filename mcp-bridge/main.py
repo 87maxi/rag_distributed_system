@@ -23,7 +23,9 @@ from opentelemetry import trace
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
 from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
 from opentelemetry.sdk.resources import Resource
+from opentelemetry.instrumentation.requests import RequestsInstrumentor
 
 # --- CONFIGURACIÓN ---
 # Sincronizado con nombres de servicios en docker-compose.yml
@@ -53,6 +55,9 @@ tracer = trace.get_tracer("rag.mcp")
 otlp_exporter = OTLPSpanExporter(endpoint=PHOENIX_ENDPOINT)
 span_processor = BatchSpanProcessor(otlp_exporter)
 trace.get_tracer_provider().add_span_processor(span_processor)
+
+# Instrumentar requests para capturar llamadas a Ollama automáticamente
+RequestsInstrumentor().instrument()
 
 # --- HELPER FUNCTIONS (Phase 3) ---
 

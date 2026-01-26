@@ -75,6 +75,7 @@ services:
     container_name: rag_indexer
     environment:
       - OLLAMA_HOST=http://rag_ollama:11434
+      - PHOENIX_ENDPOINT=http://rag_phoenix:6006/v1/traces
     command: python3 -u indexer.py
     volumes:
       - /home/maxi/Documentos/source/codecrypto/practice:/app/code

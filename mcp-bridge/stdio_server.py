@@ -17,7 +17,9 @@ from opentelemetry import trace
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
 from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
 from opentelemetry.sdk.resources import Resource
+from opentelemetry.instrumentation.requests import RequestsInstrumentor
 
 # --- CONFIGURACIÓN ---
 # Adjusted defaults for local usage (Zed editor)
@@ -36,6 +38,8 @@ tracer = trace.get_tracer("rag.mcp")
 otlp_exporter = OTLPSpanExporter(endpoint=PHOENIX_ENDPOINT)
 span_processor = BatchSpanProcessor(otlp_exporter)
 trace.get_tracer_provider().add_span_processor(span_processor)
+
+RequestsInstrumentor().instrument()
 
 def log(msg):
     sys.stderr.write(f"SERVER: {msg}\n")

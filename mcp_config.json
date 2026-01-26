@@ -1,7 +1,17 @@
 {
-  "mcpServers": {
-    "my-rag-server": {
-      "url": "http://127.0.0.1:8002/sse"
-    }
+  /// The name of your MCP server
+  "rag-bridge": {
+    /// The command which runs the MCP server
+    "command": "docker",
+    /// The arguments to pass to the MCP server
+    "args": [
+      "exec",
+      "-i",
+      "rag-mcp",
+      "python3",
+      "/app/mcp-bridge/stdio_server.py"
+    ],
+    /// The environment variables to set
+    "env": {}
   }
 }

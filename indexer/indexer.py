@@ -14,7 +14,14 @@ import requests
 logging.getLogger("opentelemetry.sdk.trace.export").setLevel(logging.CRITICAL)
 logging.getLogger("urllib3.connectionpool").setLevel(logging.CRITICAL)
 
+# OpenTelemetry
 from langchain_text_splitters import Language, RecursiveCharacterTextSplitter
+from opentelemetry import trace
+from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+from opentelemetry.instrumentation.requests import RequestsInstrumentor
+from opentelemetry.sdk.resources import Resource
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import BatchSpanProcessor
 from qdrant_client import QdrantClient
 from qdrant_client.models import (
     Distance,
@@ -45,6 +52,17 @@ OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://rag_ollama:11434")
 INDEX_PATH = Path(os.getenv("INDEX_PATH", "/app/code"))
 COLLECTION_NAME = "code_base"
 MODEL_NAME = "nomic-embed-text:latest"
+
+# 2b. OBSERVABILITY SETUP
+PHOENIX_ENDPOINT = os.getenv("PHOENIX_ENDPOINT", "http://rag_phoenix:4318/v1/traces")
+resource = Resource(attributes={"service.name": "rag-indexer"})
+trace.set_tracer_provider(TracerProvider(resource=resource))
+otlp_exporter = OTLPSpanExporter(endpoint=PHOENIX_ENDPOINT)
+span_processor = BatchSpanProcessor(otlp_exporter)
+trace.get_tracer_provider().add_span_processor(span_processor)
+RequestsInstrumentor().instrument()
+
+tracer = trace.get_tracer("rag.indexer")
 
 # 3. CLIENTE QDRANT
 qdrant = QdrantClient(host=QDRANT_HOST, port=6333)
@@ -85,8 +103,11 @@ def get_file_hash(path: Path):
         return None
 
 
+@tracer.start_as_current_span("process_file_task")
 def process_file_task(file_path: Path):
     """Procesa un archivo individual: Hash -> Split -> Embed -> Index."""
+    span = trace.get_current_span()
+    span.set_attribute("file.path", str(file_path))
     # Ignore node_modules, hidden files/dirs, data directory, and venv
     path_str = str(file_path)
     if (
@@ -103,7 +124,8 @@ def process_file_task(file_path: Path):
         or "/.next/" in path_str
         or "/.cache/" in path_str
         or "/broadcast/" in path_str
-
+        or "/forge-std/" in path_str
+        or "/openzeppelin-contracts/" in path_str
     ):
         return
 
@@ -143,28 +165,38 @@ def process_file_task(file_path: Path):
                 # Extraer metadatos heurísticos
                 metro_imports = []
                 metro_funcs = []
-                
+
                 # Heurística simple según extensión
                 if file_path.suffix == ".py":
                     import re
-                    metro_imports = re.findall(r"^(?:from|import) .*", chunk, re.MULTILINE)
+
+                    metro_imports = re.findall(
+                        r"^(?:from|import) .*", chunk, re.MULTILINE
+                    )
                     metro_funcs = re.findall(r"^def .*", chunk, re.MULTILINE)
                 elif file_path.suffix in [".ts", ".tsx", ".js"]:
                     import re
+
                     metro_imports = re.findall(r"^import .*", chunk, re.MULTILINE)
-                    metro_funcs = re.findall(r"(?:function|const|let|var) \w+\s*=?\s*\(", chunk)
+                    metro_funcs = re.findall(
+                        r"(?:function|const|let|var) \w+\s*=?\s*\(", chunk
+                    )
+
+                payload = {
+                    "path": str(file_path.relative_to(INDEX_PATH)),
+                    "content": chunk,
+                    "extension": file_path.suffix,
+                    "imports": metro_imports,
+                    "signatures": metro_funcs,
+                }
+
+                span.set_attribute("file.payload", str(payload))
 
                 points.append(
                     PointStruct(
                         id=str(uuid.uuid4()),
                         vector=vector,
-                        payload={
-                            "path": str(file_path.relative_to(INDEX_PATH)),
-                            "content": chunk,
-                            "extension": file_path.suffix,
-                            "imports": metro_imports,
-                            "signatures": metro_funcs
-                        },
+                        payload=payload,
                     )
                 )
 
