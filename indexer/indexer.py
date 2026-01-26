@@ -67,6 +67,46 @@ tracer = trace.get_tracer("rag.indexer")
 # 3. CLIENTE QDRANT
 qdrant = QdrantClient(host=QDRANT_HOST, port=6333)
 
+# 4b. LLM CALL WRAPPER
+def call_ollama(endpoint_suffix, payload, timeout=30):
+    """Realiza una llamada a Ollama envuelta en un span de trazabilidad."""
+    url = f"{OLLAMA_HOST}{endpoint_suffix}"
+    
+    # Extraer el 'prompt' o 'input' para el trace
+    input_value = payload.get("prompt") or payload.get("input") or str(payload)
+    model = payload.get("model", "unknown")
+    
+    with tracer.start_as_current_span("ollama_call") as span:
+        span.set_attribute("llm.system", "ollama")
+        span.set_attribute("llm.request.type", "chat" if "generate" in url else "embedding")
+        span.set_attribute("llm.request.model", model)
+        span.set_attribute("input.value", str(input_value))
+        
+        try:
+            res = requests.post(url, json=payload, timeout=timeout)
+            res.raise_for_status()
+            
+            # Intentar extraer la respuesta para el trace
+            try:
+                data = res.json()
+                output_value = data.get("response") or data.get("embedding") or str(data)
+                # Si es embedding y es muy largo, quizás no queramos logearlo todo, pero el usuario pidió "todo"
+                # Para embeddings, el output es un vector, tal vez no sea útil verlo entero, pero input sí.
+                if "embedding" in data:
+                    span.set_attribute("output.value", "<embedding_vector>")
+                else:
+                    span.set_attribute("output.value", str(output_value))
+                
+                return data
+            except Exception:
+                span.set_attribute("output.value", res.text)
+                return res.json()
+                
+        except Exception as e:
+            span.set_attribute("error", True)
+            span.set_attribute("error.message", str(e))
+            raise e
+
 # 4. CONFIGURACIÓN DE SPLITTERS POR LENGUAJE
 SPLITTERS = {
     ".ts": RecursiveCharacterTextSplitter.from_language(
@@ -152,14 +192,17 @@ def process_file_task(file_path: Path):
 
         points = []
         for chunk in chunks:
-            # Llamada a Ollama para generar el embedding
-            res = requests.post(
-                f"{OLLAMA_HOST}/api/embed",
-                json={"model": MODEL_NAME, "input": chunk},
-                timeout=30,
-            )
-            data = res.json()
-            vector = data.get("embeddings", [None])[0] or data.get("embedding")
+            # Llamada a Ollama para generar el embedding usando el wrapper
+            try:
+                data = call_ollama(
+                    "/api/embed",
+                    {"model": MODEL_NAME, "input": chunk},
+                    timeout=30
+                )
+                vector = data.get("embeddings", [None])[0] or data.get("embedding")
+            except Exception as e:
+                log(f"Error embedding chunk: {e}")
+                vector = None
 
             if vector:
                 # Extraer metadatos heurísticos

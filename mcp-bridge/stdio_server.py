@@ -41,6 +41,45 @@ trace.get_tracer_provider().add_span_processor(span_processor)
 
 RequestsInstrumentor().instrument()
 
+# --- 0. WRAPPER FOR OBSERVABILITY (Phase 4) ---
+def call_ollama(endpoint_suffix, payload, timeout=30):
+    """Realiza una llamada a Ollama envuelta en un span de trazabilidad."""
+    url = f"{OLLAMA_HOST}{endpoint_suffix}"
+    
+    # Extraer el 'prompt' o 'input' para el trace
+    input_value = payload.get("prompt") or payload.get("input") or str(payload)
+    model = payload.get("model", "unknown")
+    
+    with tracer.start_as_current_span("ollama_call") as span:
+        span.set_attribute("llm.system", "ollama")
+        span.set_attribute("llm.request.type", "chat" if "generate" in url else "embedding")
+        span.set_attribute("llm.request.model", model)
+        span.set_attribute("input.value", str(input_value))
+        
+        try:
+            res = requests.post(url, json=payload, timeout=timeout)
+            res.raise_for_status()
+            
+            # Intentar extraer la respuesta para el trace
+            try:
+                data = res.json()
+                output_value = data.get("response") or data.get("embedding") or str(data)
+                
+                if "embedding" in data:
+                    span.set_attribute("output.value", "<embedding_vector>")
+                else:
+                    span.set_attribute("output.value", str(output_value))
+                
+                return data
+            except Exception:
+                span.set_attribute("output.value", res.text)
+                return res.json()
+                
+        except Exception as e:
+            span.set_attribute("error", True)
+            span.set_attribute("error.message", str(e))
+            raise e
+
 def log(msg):
     sys.stderr.write(f"SERVER: {msg}\n")
     sys.stderr.flush()
@@ -81,12 +120,12 @@ def generate_search_variations(query: str) -> List[str]:
     span.set_attribute("gen_ai.model", LOCAL_MODEL_SUMMARIZER)
 
     try:
-        res = requests.post(
-            f"{OLLAMA_HOST}/api/generate",
-            json={"model": LOCAL_MODEL_SUMMARIZER, "prompt": prompt, "stream": False},
+        res_json = call_ollama(
+            "/api/generate",
+            {"model": LOCAL_MODEL_SUMMARIZER, "prompt": prompt, "stream": False},
             timeout=5,
         )
-        response_text = res.json().get("response", "")
+        response_text = res_json.get("response", "")
         span.set_attribute("gen_ai.response", response_text)
         
         lines = response_text.strip().split("\n")
@@ -118,12 +157,12 @@ def rerank_search_results(query: str, results: List[any]) -> List[any]:
     span.set_attribute("gen_ai.model", LOCAL_MODEL_CRITIC)
     
     try:
-        res = requests.post(
-            f"{OLLAMA_HOST}/api/generate",
-            json={"model": LOCAL_MODEL_CRITIC, "prompt": prompt, "stream": False},
+        res_json = call_ollama(
+            "/api/generate",
+            {"model": LOCAL_MODEL_CRITIC, "prompt": prompt, "stream": False},
             timeout=10,
         )
-        indices_str = res.json().get("response", "")
+        indices_str = res_json.get("response", "")
         span.set_attribute("gen_ai.response", indices_str)
 
         import re
@@ -171,12 +210,12 @@ def get_compressed_memory(history: List[Dict[str, str]]):
     span.set_attribute("gen_ai.model", LOCAL_MODEL_SUMMARIZER)
 
     try:
-        res = requests.post(
-            f"{OLLAMA_HOST}/api/generate",
-            json={"model": LOCAL_MODEL_SUMMARIZER, "prompt": prompt, "stream": False},
+        res_json = call_ollama(
+            "/api/generate",
+            {"model": LOCAL_MODEL_SUMMARIZER, "prompt": prompt, "stream": False},
             timeout=15,
         )
-        summary = res.json().get("response", "Sin resumen disponible.")
+        summary = res_json.get("response", "Sin resumen disponible.")
         span.set_attribute("gen_ai.response", summary)
         return summary
     except Exception as e:
@@ -193,12 +232,11 @@ def get_query_vector(text: str):
     span = trace.get_current_span()
     span.set_attribute("rag.embed_text_len", len(text))
     try:
-        res = requests.post(
-            f"{OLLAMA_HOST}/api/embed",
-            json={"model": "nomic-embed-text", "input": text},
+        data = call_ollama(
+            "/api/embed",
+            {"model": "nomic-embed-text", "input": text},
             timeout=10,
         )
-        data = res.json()
         vector = data.get("embeddings", [None])[0] or data.get("embedding")
         if vector:
             span.set_attribute("rag.vector_dim", len(vector))
@@ -249,12 +287,12 @@ def verify_code_syntax(code: str, language: str) -> str:
     span.set_attribute("gen_ai.prompt", prompt)
     
     try:
-        res = requests.post(
-            f"{OLLAMA_HOST}/api/generate",
-            json={"model": LOCAL_MODEL_SUMMARIZER, "prompt": prompt, "stream": False},
+        res_json = call_ollama(
+            "/api/generate",
+            {"model": LOCAL_MODEL_SUMMARIZER, "prompt": prompt, "stream": False},
             timeout=10,
         )
-        result = res.json().get("response", "Error validation failed").strip()
+        result = res_json.get("response", "Error validation failed").strip()
         span.set_attribute("gen_ai.response", result)
         return result
     except Exception as e:
@@ -383,12 +421,11 @@ async def handle_call_tool(
                 
                 critic_judgement = "SKIP (Error)"
                 try:
-                     res_crit = requests.post(
-                        f"{OLLAMA_HOST}/api/generate",
-                        json={"model": LOCAL_MODEL_CRITIC, "prompt": critic_prompt, "stream": False},
+                     res_json = call_ollama(
+                        "/api/generate",
+                        {"model": LOCAL_MODEL_CRITIC, "prompt": critic_prompt, "stream": False},
                         timeout=15,
                     )
-                     res_json = res_crit.json()
                      if "error" in res_json:
                          log(f"Ollama Error (Critic): {res_json['error']}")
                          critic_judgement = f"Error: {res_json['error']}"
