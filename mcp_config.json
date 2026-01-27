@@ -9,6 +9,7 @@
       "-i",
       "rag-mcp",
       "python3",
+      "-u",
       "/app/mcp-bridge/stdio_server.py"
     ],
     /// The environment variables to set

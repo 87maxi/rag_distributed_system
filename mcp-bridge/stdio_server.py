@@ -257,19 +257,24 @@ def get_project_structure(root_path: str = ".") -> str:
         return f"Error: Path {start_dir} not found."
     
     structure = []
-    for root, dirs, files in os.walk(start_dir):
-        # Ignore hidden and node_modules
-        dirs[:] = [d for d in dirs if not d.startswith(".") and d != "node_modules" and d != "__pycache__" and d != "venv"]
-        
-        level = root.replace(start_dir, "").count(os.sep)
-        indent = " " * 4 * level
-        structure.append(f"{indent}{os.path.basename(root)}/")
-        subindent = " " * 4 * (level + 1)
-        for f in files:
-            if not f.startswith("."):
-                structure.append(f"{subindent}{f}")
-                
-    return "\n".join(structure)
+    # Carpetas a ignorar explícitamente
+    ignored_folders = {"node_modules", "__pycache__", "venv", "data", "dist", "build", "out", ".git", ".github", ".vscode", ".next"}
+
+    try:
+        for root, dirs, files in os.walk(start_dir):
+            dirs[:] = [d for d in dirs if not d.startswith(".") and d not in ignored_folders]
+            
+            level = root.replace(start_dir, "").count(os.sep)
+            indent = " " * 4 * level
+            structure.append(f"{indent}{os.path.basename(root)}/")
+            subindent = " " * 4 * (level + 1)
+            for f in files:
+                if not f.startswith("."):
+                    structure.append(f"{subindent}{f}")
+                    
+        return "\n".join(structure)
+    except Exception as e:
+        return f"Error scanning structure: {e}"
 
 @tracer.start_as_current_span("verify_code_syntax")
 def verify_code_syntax(code: str, language: str) -> str:
@@ -303,41 +308,46 @@ def verify_code_syntax(code: str, language: str) -> str:
 
 @mcp_server.list_tools()
 async def handle_list_tools() -> list[types.Tool]:
+    """Lista las herramientas disponibles con nombres cortos para modelos locales."""
     return [
         types.Tool(
-            name="search_code",
-            description="Busca código y genera un prompt optimizado con memoria comprimida.",
+            name="search",
+            description=(
+                "SEARCH_CODE: Use this to search and analyze the codebase. "
+                "Takes 'query' (string). Use this for any technical question."
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "query": {"type": "string", "description": "Consulta técnica"},
-                    "history": {
-                        "type": "array",
-                        "items": {"type": "object"},
-                        "description": "Historial de chat",
-                    },
+                    "query": {"type": "string", "description": "The search query."}
                 },
                 "required": ["query"],
             },
         ),
         types.Tool(
-            name="get_project_structure",
-            description="Devuelve el árbol de archivos del proyecto para entender la estructura.",
+            name="tree",
+            description=(
+                "GET_STRUCTURE: Use this to list the directory tree and find files. "
+                "Takes 'root_path' (string, default '.')."
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "root_path": {"type": "string", "description": "Ruta relativa opcional (default .)"}
+                    "root_path": {"type": "string", "description": "Folder to list.", "default": "."}
                 },
             },
         ),
         types.Tool(
-            name="verify_syntax",
-            description="Valida la sintaxis de un fragmento de código usando IA local.",
+            name="lint",
+            description=(
+                "VERIFY_SYNTAX: Use this to check if a code snippet has errors. "
+                "Takes 'code' and 'language'."
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "code": {"type": "string", "description": "Código a validar"},
-                    "language": {"type": "string", "description": "Lenguaje (python, js, etc)"}
+                    "code": {"type": "string", "description": "Code snippet."},
+                    "language": {"type": "string", "description": "Language name."}
                 },
                 "required": ["code", "language"],
             },
@@ -350,24 +360,28 @@ async def handle_call_tool(
     name: str, arguments: dict | None
 ) -> list[types.TextContent]:
     
+    # Ensure arguments is a dict to avoid AttributeError
+    if arguments is None:
+        arguments = {}
+
     log(f"TOOL CALL: {name} | ARGS: {arguments}")
 
     # Iniciar span raíz para la herramienta
     with tracer.start_as_current_span(f"tool_call.{name}") as tool_span:
         tool_span.set_attribute("mcp.tool_name", name)
         
-        if name == "get_project_structure":
+        if name == "tree":
             root_path = arguments.get("root_path", ".")
-            tree = get_project_structure(root_path)
-            return [types.TextContent(type="text", text=tree)]
+            tree_out = get_project_structure(root_path)
+            return [types.TextContent(type="text", text=tree_out)]
 
-        elif name == "verify_syntax":
+        elif name == "lint":
             code = arguments.get("code", "")
             language = arguments.get("language", "python")
             result = verify_code_syntax(code, language)
             return [types.TextContent(type="text", text=result)]
 
-        elif name == "search_code":
+        elif name == "search":
             query = arguments.get("query")
             history = arguments.get("history", [])
             tool_span.set_attribute("rag.query", query)

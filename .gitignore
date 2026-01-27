@@ -16,5 +16,7 @@ data/phoenix/**
 
 mcp-bridge/requests.log
 
+stderr.log
+
 .aider*
 __pycache__/

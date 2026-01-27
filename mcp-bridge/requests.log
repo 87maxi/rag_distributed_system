@@ -935,3 +935,75 @@ Traceback (most recent call last):
   File "/usr/local/lib/python3.11/site-packages/requests/adapters.py", line 700, in send
     raise ConnectionError(e, request=request)
 requests.exceptions.ConnectionError: HTTPConnectionPool(host='rag_phoenix', port=4318): Max retries exceeded with url: /v1/traces (Caused by NewConnectionError("HTTPConnection(host='rag_phoenix', port=4318): Failed to establish a new connection: [Errno 111] Connection refused"))
+2026-01-26 16:38:27,316 [INFO] 📡 Servidor MCP RAG (Stdio) iniciado
+2026-01-26 16:38:27,333 [INFO] Processing request of type ListToolsRequest
+2026-01-26 16:38:27,334 [INFO] Processing request of type ListToolsRequest
+2026-01-26 16:38:28,159 [INFO] 📡 Servidor MCP RAG (Stdio) iniciado
+2026-01-26 16:38:28,167 [INFO] Processing request of type ListToolsRequest
+2026-01-26 16:38:28,170 [INFO] Processing request of type ListToolsRequest
+2026-01-26 16:39:14,123 [INFO] Processing request of type CallToolRequest
+2026-01-26 16:39:14,125 [INFO] TOOL CALL: get_project_structure | ARGS: {'root_path': '/home/maxi/Documentos/source/codecrypto/practice/ecommerce'}
+2026-01-26 16:42:20,153 [INFO] 📡 Servidor MCP RAG (Stdio) iniciado
+2026-01-26 16:42:20,164 [INFO] Processing request of type ListToolsRequest
+2026-01-26 16:42:20,166 [INFO] Processing request of type ListToolsRequest
+2026-01-26 16:42:59,092 [INFO] 📡 Servidor MCP RAG (Stdio) iniciado
+2026-01-26 16:42:59,100 [INFO] Processing request of type ListToolsRequest
+2026-01-26 16:42:59,101 [INFO] Processing request of type ListToolsRequest
+2026-01-26 17:52:21,639 [INFO] Processing request of type CallToolRequest
+2026-01-26 17:52:21,641 [INFO] TOOL CALL: get_project_structure | ARGS: {'root_path': '.'}
+2026-01-27 00:27:39,886 [INFO] 📡 Servidor MCP RAG (Stdio) iniciado
+2026-01-27 00:27:39,895 [INFO] Processing request of type ListToolsRequest
+2026-01-27 00:27:39,897 [INFO] Processing request of type ListToolsRequest
+2026-01-27 00:27:41,095 [INFO] 📡 Servidor MCP RAG (Stdio) iniciado
+2026-01-27 00:27:42,042 [INFO] 📡 Servidor MCP RAG (Stdio) iniciado
+2026-01-27 00:27:42,449 [INFO] Processing request of type ListToolsRequest
+2026-01-27 00:27:42,451 [INFO] Processing request of type ListToolsRequest
+2026-01-27 00:36:55,775 [INFO] 📡 Servidor MCP RAG (Stdio) iniciado
+2026-01-27 00:40:29,627 [INFO] 📡 Servidor MCP RAG (Stdio) iniciado
+2026-01-27 00:40:29,647 [INFO] Processing request of type ListToolsRequest
+2026-01-27 00:40:29,648 [INFO] Processing request of type ListToolsRequest
+2026-01-27 00:40:30,802 [INFO] 📡 Servidor MCP RAG (Stdio) iniciado
+2026-01-27 00:40:30,814 [INFO] Processing request of type ListToolsRequest
+2026-01-27 00:40:30,815 [INFO] Processing request of type ListToolsRequest
+2026-01-27 01:15:48,416 [INFO] 📡 Servidor MCP RAG (Stdio) iniciado
+2026-01-27 01:15:48,422 [WARNING] Failed to validate request: Received request before initialization was complete
+2026-01-27 01:15:48,423 [WARNING] Failed to validate request: Received request before initialization was complete
+2026-01-27 01:25:57,827 [INFO] 📡 Servidor MCP RAG (Stdio) iniciado
+2026-01-27 01:25:57,838 [INFO] Processing request of type ListToolsRequest
+2026-01-27 01:25:57,839 [INFO] Processing request of type ListToolsRequest
+2026-01-27 01:25:58,849 [INFO] 📡 Servidor MCP RAG (Stdio) iniciado
+2026-01-27 01:25:58,856 [INFO] Processing request of type ListToolsRequest
+2026-01-27 01:25:58,857 [INFO] Processing request of type ListToolsRequest
+2026-01-27 01:26:02,896 [INFO] 📡 Servidor MCP RAG (Stdio) iniciado
+2026-01-27 01:26:04,027 [INFO] 📡 Servidor MCP RAG (Stdio) iniciado
+2026-01-27 01:26:04,042 [INFO] Processing request of type ListToolsRequest
+2026-01-27 01:26:04,044 [INFO] Processing request of type ListToolsRequest
+2026-01-27 01:26:04,948 [INFO] 📡 Servidor MCP RAG (Stdio) iniciado
+2026-01-27 01:26:04,955 [INFO] Processing request of type ListToolsRequest
+2026-01-27 01:26:04,956 [INFO] Processing request of type ListToolsRequest
+2026-01-27 01:30:14,144 [INFO] Processing request of type CallToolRequest
+2026-01-27 01:30:14,146 [INFO] TOOL CALL: tree | ARGS: {'root_path': 'ecommerce/web-admin/src'}
+2026-01-27 01:36:07,073 [INFO] Processing request of type CallToolRequest
+2026-01-27 01:36:07,074 [INFO] TOOL CALL: tree | ARGS: {'root_path': '/home/maxi/Documentos/source/codecrypto/practice/ecommerce/web-customer'}
+2026-01-27 01:36:34,604 [INFO] Processing request of type CallToolRequest
+2026-01-27 01:36:34,605 [INFO] TOOL CALL: tree | ARGS: {'root_path': '/home/maxi/Documentos/source/codecrypto/practice/ecommerce/web-customer'}
+2026-01-27 01:37:02,888 [INFO] Processing request of type CallToolRequest
+2026-01-27 01:37:02,889 [INFO] TOOL CALL: tree | ARGS: {'root_path': '/home/maxi/Documentos/source/codecrypto/practice/ecommerce/web-customer'}
+2026-01-27 01:37:30,569 [INFO] Processing request of type CallToolRequest
+2026-01-27 01:37:30,570 [INFO] TOOL CALL: tree | ARGS: {'root_path': '/home/maxi/Documentos/source/codecrypto/practice/ecommerce/web-customer'}
+2026-01-27 01:37:58,265 [INFO] Processing request of type CallToolRequest
+2026-01-27 01:37:58,266 [INFO] TOOL CALL: tree | ARGS: {'root_path': '/home/maxi/Documentos/source/codecrypto/practice/ecommerce/web-customer'}
+2026-01-27 01:38:25,056 [INFO] Processing request of type CallToolRequest
+2026-01-27 01:38:25,057 [INFO] TOOL CALL: tree | ARGS: {'root_path': './web-customer'}
+2026-01-27 01:38:51,716 [INFO] Processing request of type CallToolRequest
+2026-01-27 01:38:51,717 [INFO] TOOL CALL: tree | ARGS: {'root_path': './web-customer'}
+2026-01-27 01:49:28,764 [INFO] Processing request of type CallToolRequest
+2026-01-27 01:49:28,765 [INFO] TOOL CALL: tree | ARGS: {'root_path': '/home/maxi/Documentos/source/codecrypto/practice/ecommerce/web-customer'}
+2026-01-27 01:57:11,929 [INFO] Processing request of type CallToolRequest
+2026-01-27 01:57:11,930 [INFO] TOOL CALL: tree | ARGS: {'root_path': '/home/maxi/Documentos/source/codecrypto/practice/ecommerce/web-customer'}
+2026-01-27 02:09:20,324 [INFO] Processing request of type CallToolRequest
+2026-01-27 02:09:20,325 [INFO] TOOL CALL: tree | ARGS: {'root_path': '/home/maxi/Documentos/source/codecrypto/practice/ecommerce/web-customer'}
+2026-01-27 02:09:48,025 [INFO] Processing request of type CallToolRequest
+2026-01-27 02:09:48,026 [INFO] TOOL CALL: tree | ARGS: {'root_path': '/home/maxi/Documentos/source/codecrypto/practice/ecommerce/web-customer'}
+2026-01-27 02:10:14,995 [INFO] Processing request of type CallToolRequest
+2026-01-27 02:10:14,996 [INFO] TOOL CALL: tree | ARGS: {'root_path': 'ecommerce/web-customer'}
