@@ -70,6 +70,23 @@ services:
       start_period: 30s
     networks: ["rag_network"]
 
+  tabby:
+    restart: always
+    container_name: tabby
+    image: registry.tabbyml.com/tabbyml/tabby
+    command: serve --model StarCoder-1B --chat-model Qwen2-1.5B-Instruct --device cuda
+    volumes:
+      - "$HOME/.tabby:/data"
+    ports:
+      - 8181:8080
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["1"]
+              capabilities: [gpu]
+
   rag-indexer:
     build: ./indexer
     container_name: rag_indexer
