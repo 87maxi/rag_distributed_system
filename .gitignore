@@ -20,3 +20,5 @@ stderr.log
 
 .aider*
 __pycache__/
+model-runner/
+
