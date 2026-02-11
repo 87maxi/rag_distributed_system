@@ -48,63 +48,65 @@ file_hashes = {}
 
 # 2. CONFIGURACIÓN
 QDRANT_HOST = os.getenv("QDRANT_HOST", "rag_qdrant")
-OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://rag_ollama:11434")
-INDEX_PATH = Path(os.getenv("INDEX_PATH", "/app/code"))
-COLLECTION_NAME = "code_base"
-MODEL_NAME = "nomic-embed-text:latest"
+# 4b. LLM CALL WRAPPER & CONFIG
+LLM_HOST = os.getenv("OLLAMA_HOST", "http://rag_ollama:11434")
+LLM_API_TYPE = os.getenv("LLM_API_TYPE", "ollama")
 
-# 2b. OBSERVABILITY SETUP
-PHOENIX_ENDPOINT = os.getenv("PHOENIX_ENDPOINT", "http://rag_phoenix:4318/v1/traces")
-resource = Resource(attributes={"service.name": "rag-indexer"})
-trace.set_tracer_provider(TracerProvider(resource=resource))
-otlp_exporter = OTLPSpanExporter(endpoint=PHOENIX_ENDPOINT)
-span_processor = BatchSpanProcessor(otlp_exporter)
-trace.get_tracer_provider().add_span_processor(span_processor)
-RequestsInstrumentor().instrument()
+def call_llm_generic(endpoint_type: str, model: str, payload: dict, timeout=30):
+    """Generic wrapper for LLM calls (Ollama/OpenAI)."""
+    if LLM_API_TYPE == "ollama":
+        return _call_ollama(endpoint_type, model, payload, timeout)
+    elif LLM_API_TYPE == "openai":
+        return _call_openai_compatible(endpoint_type, model, payload, timeout)
+    return _call_ollama(endpoint_type, model, payload, timeout) # Fallback
 
-tracer = trace.get_tracer("rag.indexer")
+def _call_ollama(endpoint_type, model, payload, timeout):
+    suffix = "/api/generate" if endpoint_type == "generate" else "/api/embed"
+    final_payload = payload.copy()
+    final_payload["model"] = model
+    if endpoint_type == "generate": final_payload["stream"] = False
+    return _execute_http_call(suffix, final_payload, timeout, "ollama")
 
-# 3. CLIENTE QDRANT
-qdrant = QdrantClient(host=QDRANT_HOST, port=6333)
+def _call_openai_compatible(endpoint_type, model, payload, timeout):
+    suffix = "/v1/chat/completions" if endpoint_type == "generate" else "/v1/embeddings"
+    final_payload = {}
+    if endpoint_type == "generate":
+        final_payload = {
+            "model": model,
+            "messages": [{"role": "user", "content": payload.get("prompt","")}],
+            "temperature": 0.0
+        }
+    else:
+        final_payload = {"model": model, "input": payload.get("input", "")}
 
-# 4b. LLM CALL WRAPPER
-def call_ollama(endpoint_suffix, payload, timeout=30):
-    """Realiza una llamada a Ollama envuelta en un span de trazabilidad."""
-    url = f"{OLLAMA_HOST}{endpoint_suffix}"
+    res_data = _execute_http_call(suffix, final_payload, timeout, "openai")
     
-    # Extraer el 'prompt' o 'input' para el trace
-    input_value = payload.get("prompt") or payload.get("input") or str(payload)
-    model = payload.get("model", "unknown")
+    # Normalize result
+    normalized = {}
+    if endpoint_type == "generate":
+        try:
+            normalized["response"] = res_data["choices"][0]["message"]["content"]
+        except: normalized["response"] = ""
+    else:
+        try:
+            data = res_data["data"][0]["embedding"]
+            normalized["embeddings"] = [data]
+            normalized["embedding"] = data
+        except: normalized["embedding"] = None
+    return normalized
+
+def _execute_http_call(endpoint_suffix, payload, timeout, system):
+    base_host = LLM_HOST.rstrip("/")
+    url = f"{base_host}{endpoint_suffix}"
     
-    with tracer.start_as_current_span("ollama_call") as span:
-        span.set_attribute("llm.system", "ollama")
-        span.set_attribute("llm.request.type", "chat" if "generate" in url else "embedding")
-        span.set_attribute("llm.request.model", model)
-        span.set_attribute("input.value", str(input_value))
-        
+    with tracer.start_as_current_span(f"{system}_call") as span:
+        span.set_attribute("llm.system", system)
         try:
             res = requests.post(url, json=payload, timeout=timeout)
             res.raise_for_status()
-            
-            # Intentar extraer la respuesta para el trace
-            try:
-                data = res.json()
-                output_value = data.get("response") or data.get("embedding") or str(data)
-                # Si es embedding y es muy largo, quizás no queramos logearlo todo, pero el usuario pidió "todo"
-                # Para embeddings, el output es un vector, tal vez no sea útil verlo entero, pero input sí.
-                if "embedding" in data:
-                    span.set_attribute("output.value", "<embedding_vector>")
-                else:
-                    span.set_attribute("output.value", str(output_value))
-                
-                return data
-            except Exception:
-                span.set_attribute("output.value", res.text)
-                return res.json()
-                
+            return res.json()
         except Exception as e:
             span.set_attribute("error", True)
-            span.set_attribute("error.message", str(e))
             raise e
 
 # 4. CONFIGURACIÓN DE SPLITTERS POR LENGUAJE
@@ -192,11 +194,12 @@ def process_file_task(file_path: Path):
 
         points = []
         for chunk in chunks:
-            # Llamada a Ollama para generar el embedding usando el wrapper
+            # Llamada a LLM para generar el embedding usando el wrapper
             try:
-                data = call_ollama(
-                    "/api/embed",
-                    {"model": MODEL_NAME, "input": chunk},
+                data = call_llm_generic(
+                    "embed",
+                    MODEL_NAME,
+                    {"input": chunk},
                     timeout=30
                 )
                 vector = data.get("embeddings", [None])[0] or data.get("embedding")

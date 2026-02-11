@@ -1,7 +1,7 @@
 import asyncio
 import os
 import sys
-from typing import Dict, List
+from typing import Dict, List, Any
 
 import mcp.types as types
 import requests
@@ -23,14 +23,14 @@ from opentelemetry import trace
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
 from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
-from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
 from opentelemetry.sdk.resources import Resource
 from opentelemetry.instrumentation.requests import RequestsInstrumentor
 
 # --- CONFIGURACIÓN ---
 # Sincronizado con nombres de servicios en docker-compose.yml
 QDRANT_HOST = os.getenv("QDRANT_HOST", "rag_qdrant")
-OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://rag_ollama:11434")
+LLM_HOST = os.getenv("OLLAMA_HOST", "http://rag_ollama:11434") # Generic host env var (can point to DMR)
+LLM_API_TYPE = os.getenv("LLM_API_TYPE", "ollama") # 'ollama' or 'openai' (for DMR)
 COLLECTION_NAME = "code_base"
 LOCAL_MODEL_SUMMARIZER = "qwen2.5:0.5b"  # El "Bibliotecario" local
 LOCAL_MODEL_CRITIC = "qwen2.5:1.5b"  # El "Crítico" local
@@ -56,47 +56,123 @@ otlp_exporter = OTLPSpanExporter(endpoint=PHOENIX_ENDPOINT)
 span_processor = BatchSpanProcessor(otlp_exporter)
 trace.get_tracer_provider().add_span_processor(span_processor)
 
-# Instrumentar requests para capturar llamadas a Ollama automáticamente
+# Instrumentar requests para capturar llamadas a Ollama/DMR automáticamente
 RequestsInstrumentor().instrument()
 
-# --- 0. WRAPPER FOR OBSERVABILITY (Phase 4) ---
-def call_ollama(endpoint_suffix, payload, timeout=30):
-    """Realiza una llamada a Ollama envuelta en un span de trazabilidad."""
-    url = f"{OLLAMA_HOST}{endpoint_suffix}"
+# --- 0. WRAPPER FOR OBSERVABILITY & ABSTRACTION (Phase 4 & Refactor) ---
+
+def call_llm_generic(endpoint_type: str, model: str, payload: Dict[str, Any], timeout=30) -> Dict[str, Any]:
+    """
+    Abstracción para llamar al LLM soportando Ollama y OpenAI (DMR).
+    endpoint_type: 'generate' (completion/chat) or 'embed' (embeddings)
+    """
+    # Force use of configured model if provided, but function arg takes precedence if specific
     
-    # Extraer el 'prompt' o 'input' para el trace
+    if LLM_API_TYPE == "ollama":
+        return _call_ollama(endpoint_type, model, payload, timeout)
+    elif LLM_API_TYPE == "openai":
+        return _call_openai_compatible(endpoint_type, model, payload, timeout)
+    else:
+        # Tech debt: Default to ollama if unspecified or typo, but maybe log warning
+        return _call_ollama(endpoint_type, model, payload, timeout)
+
+def _call_ollama(endpoint_type, model, payload, timeout):
+    # Map generic types to Ollama endpoints
+    suffix = "/api/generate" if endpoint_type == "generate" else "/api/embed"
+    
+    # Payload adaptation
+    final_payload = payload.copy()
+    final_payload["model"] = model
+    if endpoint_type == "generate":
+         final_payload["stream"] = False
+    
+    return _execute_http_call(suffix, final_payload, timeout, system="ollama")
+
+def _call_openai_compatible(endpoint_type, model, payload, timeout):
+    # Map generic types to OpenAI endpoints
+    suffix = "/v1/chat/completions" if endpoint_type == "generate" else "/v1/embeddings"
+    
+    final_payload = {}
+    if endpoint_type == "generate":
+        # Adapt Ollama 'prompt' to OpenAI 'messages'
+        prompt = payload.get("prompt", "")
+        final_payload = {
+            "model": model,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": payload.get("temperature", 0.7)
+        }
+    else:
+        # Embeddings
+        final_payload = {
+            "model": model, 
+            "input": payload.get("input", "")
+        }
+
+    response_data = _execute_http_call(suffix, final_payload, timeout, system="openai")
+    
+    # Normalize response to match Ollama format expected by app logic
+    normalized = {}
+    if endpoint_type == "generate":
+        try:
+            content = response_data["choices"][0]["message"]["content"]
+            normalized["response"] = content
+        except (KeyError, IndexError, TypeError):
+            normalized["response"] = "" 
+            normalized["error"] = f"Invalid response from DMR: {response_data}"
+    else:
+        # Embeddings
+        try:
+            # OpenAI format: data: [{embedding: [...]}]
+            data = response_data["data"][0]["embedding"]
+            normalized["embeddings"] = [data] # Ollama format emulation
+            normalized["embedding"] = data
+        except (KeyError, IndexError, TypeError):
+             normalized["embedding"] = None
+
+    return normalized
+
+def _execute_http_call(endpoint_suffix, payload, timeout, system="llm"):
+    """Realiza la llamada HTTP real envuelta en un span."""
+    # Ensure LLM_HOST doesn't end with / if suffix starts with /
+    base_host = LLM_HOST.rstrip("/")
+    url = f"{base_host}{endpoint_suffix}"
+    
     input_value = payload.get("prompt") or payload.get("input") or str(payload)
     model = payload.get("model", "unknown")
     
-    with tracer.start_as_current_span("ollama_call") as span:
-        span.set_attribute("llm.system", "ollama")
-        span.set_attribute("llm.request.type", "chat" if "generate" in url else "embedding")
+    with tracer.start_as_current_span(f"{system}_call") as span:
+        span.set_attribute("llm.system", system)
+        span.set_attribute("llm.request.type", "chat" if "chat" in url or "generate" in url else "embedding")
         span.set_attribute("llm.request.model", model)
         span.set_attribute("input.value", str(input_value))
         
         try:
+            # Verify DMR headers if needed (usually not for local)
             res = requests.post(url, json=payload, timeout=timeout)
             res.raise_for_status()
             
-            # Intentar extraer la respuesta para el trace
             try:
                 data = res.json()
-                output_value = data.get("response") or data.get("embedding") or str(data)
+                # Log outcome check (truncated)
+                output_val = "..." 
+                if "choices" in data: 
+                    output_val = str(data["choices"][0]["message"]["content"])[:50]
+                elif "response" in data: 
+                    output_val = str(data["response"])[:50]
+                elif "data" in data or "embedding" in data: 
+                    output_val = "<embedding_vector>"
                 
-                if "embedding" in data:
-                    span.set_attribute("output.value", "<embedding_vector>")
-                else:
-                    span.set_attribute("output.value", str(output_value))
-                
+                span.set_attribute("output.value", output_val)
                 return data
             except Exception:
                 span.set_attribute("output.value", res.text)
-                return res.json()
+                return res.json() # Try parsing anyway
                 
         except Exception as e:
             span.set_attribute("error", True)
             span.set_attribute("error.message", str(e))
-            raise e
+            # Don't crash server, return error dict
+            return {"error": str(e)}
 
 # --- HELPER FUNCTIONS (Phase 3) ---
 
@@ -104,9 +180,10 @@ def generate_search_variations(query: str) -> List[str]:
     """Genera 3 variaciones de la query para expansión."""
     prompt = f"Genera 3 variaciones de busqueda tecnica breves para: '{query}'. Responde solo las 3 frases separadas por linea sin enumerar."
     try:
-        res_json = call_ollama(
-            "/api/generate",
-            {"model": LOCAL_MODEL_SUMMARIZER, "prompt": prompt, "stream": False},
+        res_json = call_llm_generic(
+            "generate",
+            LOCAL_MODEL_SUMMARIZER,
+            {"prompt": prompt},
             timeout=5,
         )
         lines = res_json.get("response", "").strip().split("\n")
@@ -129,9 +206,10 @@ def rerank_search_results(query: str, results: List[any]) -> List[any]:
     )
     
     try:
-        res_json = call_ollama(
-            "/api/generate",
-            {"model": LOCAL_MODEL_CRITIC, "prompt": prompt, "stream": False},
+        res_json = call_llm_generic(
+            "generate",
+            LOCAL_MODEL_CRITIC,
+            {"prompt": prompt},
             timeout=10,
         )
         indices_str = res_json.get("response", "")
@@ -154,7 +232,6 @@ def rerank_search_results(query: str, results: List[any]) -> List[any]:
 
 def get_compressed_memory(history: List[Dict[str, str]]):
     """Usa Qwen-0.5B local para resumir el historial largo."""
-    # CORRECCIÓN: Se agrega return para evitar que el código siga bajando sin datos
     if not history or len(history) < 1:
         log("Iniciando Bibliotecario con historial corto/vacío")
         return "No hay historial previo relevante."
@@ -172,9 +249,10 @@ def get_compressed_memory(history: List[Dict[str, str]]):
     )
 
     try:
-        res_json = call_ollama(
-            "/api/generate",
-            {"model": LOCAL_MODEL_SUMMARIZER, "prompt": prompt, "stream": False},
+        res_json = call_llm_generic(
+            "generate",
+            LOCAL_MODEL_SUMMARIZER,
+            {"prompt": prompt},
             timeout=15,
         )
         return res_json.get("response", "Sin resumen disponible.")
@@ -189,14 +267,15 @@ def get_compressed_memory(history: List[Dict[str, str]]):
 def get_query_vector(text: str):
     """Genera embeddings usando el modelo local nomic."""
     try:
-        data = call_ollama(
-            "/api/embed",
-            {"model": "nomic-embed-text", "input": text},
+        data = call_llm_generic(
+            "embed",
+            "nomic-embed-text",
+            {"input": text},
             timeout=10,
         )
         return data.get("embeddings", [None])[0] or data.get("embedding")
     except Exception as e:
-        log(f"Error en Ollama Embed: {e}")
+        log(f"Error en Embed: {e}")
         return None
 
 
@@ -237,9 +316,10 @@ def verify_code_syntax(code: str, language: str) -> str:
         f"Si hay error, responde 'ERROR: <descripcion breve>'. Código:\n\n{code}"
     )
     try:
-        res_json = call_ollama(
-            "/api/generate",
-            {"model": LOCAL_MODEL_SUMMARIZER, "prompt": prompt, "stream": False},
+        res_json = call_llm_generic(
+            "generate",
+            LOCAL_MODEL_SUMMARIZER,
+            {"prompt": prompt},
             timeout=10,
         )
         return res_json.get("response", "Error validation failed").strip()
@@ -368,13 +448,14 @@ async def handle_call_tool(
             )
             critic_judgement = "SKIP (Error)"
             try:
-                 res_json = call_ollama(
-                    "/api/generate",
-                    {"model": LOCAL_MODEL_CRITIC, "prompt": critic_prompt, "stream": False},
+                 res_json = call_llm_generic(
+                    "generate",
+                    LOCAL_MODEL_CRITIC,
+                    {"prompt": critic_prompt},
                     timeout=15,
                 )
                  if "error" in res_json:
-                     log(f"Ollama Error (Critic): {res_json['error']}")
+                     log(f"LLM Error (Critic): {res_json['error']}")
                      critic_judgement = f"Error: {res_json['error']}"
                  else:
                      critic_judgement = res_json.get("response", "No judgment").strip()
@@ -450,5 +531,5 @@ app = Starlette(
 )
 
 if __name__ == "__main__":
-    log("📡 Servidor MCP RAG iniciado en puerto 8002")
+    log(f"📡 Servidor MCP RAG iniciado en puerto 8002. Modo LLM: {LLM_API_TYPE}")
     uvicorn.run(app, host="0.0.0.0", port=8002)
