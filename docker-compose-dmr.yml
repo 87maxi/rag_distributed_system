@@ -42,15 +42,74 @@ services:
       - ./data/phoenix:/root/.phoenix
     networks: [ "rag_network" ]
 
+  rag_embedding_server:
+    build: ./embedding_server
+    container_name: rag_embedding_server
+    ports:
+      - "8000:8000"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: [ "0" ] # Asignar a la GPU local (GTX 1650)
+              capabilities: [ gpu ]
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:8000/health" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    networks: [ "rag_network" ]
+
+  rag_bibliotecario:
+    build: ./bibliotecario_server
+    container_name: rag_bibliotecario
+    ports:
+      - "8001:8001"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: [ "0" ] # Asignar a la GPU local (GTX 1650), compartiendo con embedding_server
+              capabilities: [ gpu ]
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:8001/health" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s # Puede tomar más tiempo para cargar el LLM
+    networks: [ "rag_network" ]
+
+  rag_critic_server:
+    build: ./critic_server
+    container_name: rag_critic_server
+    ports:
+      - "8003:8002"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: [ "0" ] # Compartiendo con embedding_server y bibliotecario
+              capabilities: [ gpu ]
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:8002/health" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s # Puede tomar más tiempo para cargar el LLM
+    networks: [ "rag_network" ]
+
   rag-indexer:
     build: ./indexer
     container_name: rag_indexer
     extra_hosts:
       - "host.docker.internal:host-gateway"
     environment:
-      - OLLAMA_HOST=http://host.docker.internal:12434
-      - LLM_API_TYPE=openai
-      - PHOENIX_ENDPOINT=http://rag_phoenix:6006/v1/traces
+      - EMBEDDING_SERVER_HOST=http://rag_embedding_server:8000
+      - PHOENIX_ENDPOINT=http://rag_phoenix:4318/v1/traces
     command: python3 -u indexer.py
     volumes:
       - /home/maxi/Documentos/source/codecrypto/practice:/app/code
@@ -59,19 +118,30 @@ services:
         condition: service_healthy
       rag_phoenix:
         condition: service_healthy
+      rag_embedding_server:
+        condition: service_healthy
     networks: [ "rag_network" ]
 
   rag-mcp-server:
     build: ./mcp-bridge
-    container_name: rag-mcp
+    container_name: rag_mcp
     extra_hosts:
       - "host.docker.internal:host-gateway"
     environment:
-      - OLLAMA_HOST=http://host.docker.internal:12434
-      - LLM_API_TYPE=openai
+      # --- El Bibliotecario (infraestructura RAG) ---
       - QDRANT_HOST=rag_qdrant
-      - PHOENIX_ENDPOINT=http://rag_phoenix:6006/v1/traces
+      - QDRANT_COLLECTION_NAME=code_chunks
+      - EMBEDDING_SERVER_HOST=http://rag_embedding_server:8000
+      - BIBLIOTECARIO_SERVER_HOST=http://rag_bibliotecario:8001
+      - CRITIC_SERVER_HOST=http://rag_critic_server:8002
+      - PHOENIX_ENDPOINT=http://rag_phoenix:4318/v1/traces
       - PROJECT_ROOT=/app/code
+      # --- El Sabio (intercambiable — cambiar para usar otro LLM) ---
+      # Opciones: ver mcp-bridge/sabio_configs/*.env
+      - SABIO_BASE_URL=http://host.docker.internal:12434
+      - SABIO_MODEL=ai/qwen2.5
+      - SABIO_API_KEY=none
+      - SABIO_TIMEOUT=60
     command: python3 -u main.py
     volumes:
       - /home/maxi/Documentos/source/codecrypto/practice:/app/code
@@ -80,6 +150,12 @@ services:
       rag_qdrant:
         condition: service_healthy
       rag_phoenix:
+        condition: service_healthy
+      rag_embedding_server:
+        condition: service_healthy
+      rag_bibliotecario:
+        condition: service_healthy
+      rag_critic_server:
         condition: service_healthy
     ports:
       - 8002:8002

@@ -1,39 +1,50 @@
 import asyncio
+import json
 import os
 import sys
-from typing import Dict, List, Any
+import time
+import uuid
+from pathlib import Path
+from typing import Any, Dict, List
 
 import mcp.types as types
-import requests
+import httpx
 
 # Servidor Web y MCP
 import uvicorn
 from mcp.server import Server
 from mcp.server.models import InitializationOptions
 from mcp.server.sse import SseServerTransport
-from qdrant_client import QdrantClient
-from starlette.applications import Starlette
-from starlette.middleware import Middleware
-from starlette.middleware.cors import CORSMiddleware
-from starlette.responses import Response
-from starlette.routing import Mount, Route
 
 # OpenTelemetry
 from opentelemetry import trace
+from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+from opentelemetry.instrumentation.requests import RequestsInstrumentor
+from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
-from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
-from opentelemetry.sdk.resources import Resource
-from opentelemetry.instrumentation.requests import RequestsInstrumentor
+from qdrant_client import QdrantClient, models
+from starlette.applications import Starlette
+from starlette.middleware import Middleware
+from starlette.middleware.cors import CORSMiddleware
+from starlette.requests import Request
+from starlette.responses import JSONResponse, Response
+from starlette.routing import Mount, Route
 
 # --- CONFIGURACIÓN ---
 # Sincronizado con nombres de servicios en docker-compose.yml
 QDRANT_HOST = os.getenv("QDRANT_HOST", "rag_qdrant")
-LLM_HOST = os.getenv("OLLAMA_HOST", "http://rag_ollama:11434") # Generic host env var (can point to DMR)
-LLM_API_TYPE = os.getenv("LLM_API_TYPE", "ollama") # 'ollama' or 'openai' (for DMR)
-COLLECTION_NAME = "code_base"
-LOCAL_MODEL_SUMMARIZER = "qwen2.5:0.5b"  # El "Bibliotecario" local
-LOCAL_MODEL_CRITIC = "qwen2.5:1.5b"  # El "Crítico" local
+COLLECTION_NAME = os.getenv("QDRANT_COLLECTION_NAME", "code_chunks")
+
+# Hosts para los servicios locales de IA
+EMBEDDING_SERVER_HOST = os.getenv(
+    "EMBEDDING_SERVER_HOST", "http://rag_embedding_server:8000"
+)
+BIBLIOTECARIO_SERVER_HOST = os.getenv(
+    "BIBLIOTECARIO_SERVER_HOST", "http://rag_bibliotecario:8001"
+)
+CRITIC_SERVER_HOST = os.getenv("CRITIC_SERVER_HOST", "http://rag_critic_server:8002")
+
 PROJECT_ROOT = os.getenv("PROJECT_ROOT", "/app/code")
 
 
@@ -47,6 +58,11 @@ qdrant = QdrantClient(host=QDRANT_HOST, port=6333)
 mcp_server = Server("mcp-rag-bridge")
 sse = SseServerTransport("/messages")
 
+# El Sabio — abstracción intercambiable del LLM (configurado via SABIO_* env vars)
+from sabio_client import SabioClient  # noqa: E402
+sabio = SabioClient()
+log(f"El Sabio → {sabio.base_url}  modelo={sabio.model}")
+
 # --- OBSERVABILITY SETUP (Phase 4) ---
 PHOENIX_ENDPOINT = os.getenv("PHOENIX_ENDPOINT", "http://rag_phoenix:4318/v1/traces")
 resource = Resource(attributes={"service.name": "rag-mcp-server"})
@@ -56,480 +72,581 @@ otlp_exporter = OTLPSpanExporter(endpoint=PHOENIX_ENDPOINT)
 span_processor = BatchSpanProcessor(otlp_exporter)
 trace.get_tracer_provider().add_span_processor(span_processor)
 
-# Instrumentar requests para capturar llamadas a Ollama/DMR automáticamente
+# Instrumentar requests para capturar llamadas a servicios automáticamente
 RequestsInstrumentor().instrument()
 
-# --- 0. WRAPPER FOR OBSERVABILITY & ABSTRACTION (Phase 4 & Refactor) ---
+# --- 0. OBSERVABILITY NOTE ---
+# Las llamadas al LLM principal (El Sabio) están instrumentadas dentro de SabioClient.
+# Las llamadas a los microservicios internos (Bibliotecario, Critic, Embedding) se
+# instrumentan en sus propias funciones de llamada.
 
-def call_llm_generic(endpoint_type: str, model: str, payload: Dict[str, Any], timeout=30) -> Dict[str, Any]:
+
+# --- NEW EMBEDDING SERVER INTERACTION (Phase 2) ---
+async def get_embedding_from_server(texts: List[str], timeout=30) -> List[List[float]]:
     """
-    Abstracción para llamar al LLM soportando Ollama y OpenAI (DMR).
-    endpoint_type: 'generate' (completion/chat) or 'embed' (embeddings)
+    Obtiene embeddings de texto desde el servidor de embeddings dedicado.
+    Espera una lista de textos y devuelve una lista de listas de floats.
     """
-    # Force use of configured model if provided, but function arg takes precedence if specific
-    
-    if LLM_API_TYPE == "ollama":
-        return _call_ollama(endpoint_type, model, payload, timeout)
-    elif LLM_API_TYPE == "openai":
-        return _call_openai_compatible(endpoint_type, model, payload, timeout)
-    else:
-        # Tech debt: Default to ollama if unspecified or typo, but maybe log warning
-        return _call_ollama(endpoint_type, model, payload, timeout)
-
-def _call_ollama(endpoint_type, model, payload, timeout):
-    # Map generic types to Ollama endpoints
-    suffix = "/api/generate" if endpoint_type == "generate" else "/api/embed"
-    
-    # Payload adaptation
-    final_payload = payload.copy()
-    final_payload["model"] = model
-    if endpoint_type == "generate":
-         final_payload["stream"] = False
-    
-    return _execute_http_call(suffix, final_payload, timeout, system="ollama")
-
-def _call_openai_compatible(endpoint_type, model, payload, timeout):
-    # Map generic types to OpenAI endpoints
-    suffix = "/v1/chat/completions" if endpoint_type == "generate" else "/v1/embeddings"
-    
-    final_payload = {}
-    if endpoint_type == "generate":
-        # Adapt Ollama 'prompt' to OpenAI 'messages'
-        prompt = payload.get("prompt", "")
-        final_payload = {
-            "model": model,
-            "messages": [{"role": "user", "content": prompt}],
-            "temperature": payload.get("temperature", 0.7)
-        }
-    else:
-        # Embeddings
-        final_payload = {
-            "model": model, 
-            "input": payload.get("input", "")
-        }
-
-    response_data = _execute_http_call(suffix, final_payload, timeout, system="openai")
-    
-    # Normalize response to match Ollama format expected by app logic
-    normalized = {}
-    if endpoint_type == "generate":
+    with tracer.start_as_current_span("get_embedding_from_embedding_server") as span:
+        span.set_attribute("embedding.server.host", EMBEDDING_SERVER_HOST)
+        span.set_attribute("text.count", len(texts))
+        span.set_attribute("text.lengths", [len(t) for t in texts])
         try:
-            content = response_data["choices"][0]["message"]["content"]
-            normalized["response"] = content
-        except (KeyError, IndexError, TypeError):
-            normalized["response"] = "" 
-            normalized["error"] = f"Invalid response from DMR: {response_data}"
-    else:
-        # Embeddings
-        try:
-            # OpenAI format: data: [{embedding: [...]}]
-            data = response_data["data"][0]["embedding"]
-            normalized["embeddings"] = [data] # Ollama format emulation
-            normalized["embedding"] = data
-        except (KeyError, IndexError, TypeError):
-             normalized["embedding"] = None
-
-    return normalized
-
-def _execute_http_call(endpoint_suffix, payload, timeout, system="llm"):
-    """Realiza la llamada HTTP real envuelta en un span."""
-    # Ensure LLM_HOST doesn't end with / if suffix starts with /
-    base_host = LLM_HOST.rstrip("/")
-    url = f"{base_host}{endpoint_suffix}"
-    
-    input_value = payload.get("prompt") or payload.get("input") or str(payload)
-    model = payload.get("model", "unknown")
-    
-    with tracer.start_as_current_span(f"{system}_call") as span:
-        span.set_attribute("llm.system", system)
-        span.set_attribute("llm.request.type", "chat" if "chat" in url or "generate" in url else "embedding")
-        span.set_attribute("llm.request.model", model)
-        span.set_attribute("input.value", str(input_value))
-        
-        try:
-            # Verify DMR headers if needed (usually not for local)
-            res = requests.post(url, json=payload, timeout=timeout)
-            res.raise_for_status()
-            
-            try:
-                data = res.json()
-                # Log outcome check (truncated)
-                output_val = "..." 
-                if "choices" in data: 
-                    output_val = str(data["choices"][0]["message"]["content"])[:50]
-                elif "response" in data: 
-                    output_val = str(data["response"])[:50]
-                elif "data" in data or "embedding" in data: 
-                    output_val = "<embedding_vector>"
-                
-                span.set_attribute("output.value", output_val)
-                return data
-            except Exception:
-                span.set_attribute("output.value", res.text)
-                return res.json() # Try parsing anyway
-                
+            url = f"{EMBEDDING_SERVER_HOST}/embed"
+            payload = {"texts": texts}
+            async with httpx.AsyncClient() as client:
+                res = await client.post(url, json=payload, timeout=timeout)
+                res.raise_for_status()
+                embeddings_data = res.json()
+            if "embeddings" in embeddings_data and isinstance(
+                embeddings_data["embeddings"], list
+            ):
+                return embeddings_data["embeddings"]
+            else:
+                raise ValueError(
+                    f"Invalid embeddings response from server: {embeddings_data}"
+                )
+        except httpx.HTTPStatusError as e:
+            span.set_attribute("error", True)
+            span.set_attribute("error.message", str(e))
+            log(f"Error calling embedding server: {e}")
+            raise
         except Exception as e:
             span.set_attribute("error", True)
             span.set_attribute("error.message", str(e))
-            # Don't crash server, return error dict
-            return {"error": str(e)}
-
-# --- HELPER FUNCTIONS (Phase 3) ---
-
-def generate_search_variations(query: str) -> List[str]:
-    """Genera 3 variaciones de la query para expansión."""
-    prompt = f"Genera 3 variaciones de busqueda tecnica breves para: '{query}'. Responde solo las 3 frases separadas por linea sin enumerar."
-    try:
-        res_json = call_llm_generic(
-            "generate",
-            LOCAL_MODEL_SUMMARIZER,
-            {"prompt": prompt},
-            timeout=5,
-        )
-        lines = res_json.get("response", "").strip().split("\n")
-        variations = [l.strip("- ").strip() for l in lines if l.strip()]
-        return variations[:3]
-    except:
-        return []
-
-def rerank_search_results(query: str, results: List[any]) -> List[any]:
-    """Usa el Crítico (1.5B) para ordenar los resultados."""
-    if not results: return []
-    
-    snippets = []
-    for i, r in enumerate(results):
-        snippets.append(f"[{i}] Path: {r.payload.get('path')} Content: {r.payload.get('content')[:100]}...")
-    
-    prompt = (
-        f"Query: {query}\nSnippets:\n" + "\n".join(snippets) + 
-        "\nSelect the indices of the 3 most relevant snippets (e.g. '0, 2, 4'). Return ONLY the numbers."
-    )
-    
-    try:
-        res_json = call_llm_generic(
-            "generate",
-            LOCAL_MODEL_CRITIC,
-            {"prompt": prompt},
-            timeout=10,
-        )
-        indices_str = res_json.get("response", "")
-        import re
-        indices = [int(x) for x in re.findall(r"\d+", indices_str)]
-        reranked = [results[i] for i in indices if i < len(results)]
-        # Add remaining unique results if less than 3
-        seen_ids = set(r.id for r in reranked)
-        for r in results:
-            if r.id not in seen_ids:
-                reranked.append(r)
-        
-        return reranked
-    except Exception as e:
-        log(f"Rerank failed: {e}")
-        return results
-
-# --- 1. MÉTODO DEL BIBLIOTECARIO (Resumen del Historial) ---
+            log(f"Unexpected error in get_embedding_from_server: {e}")
+            raise
 
 
-def get_compressed_memory(history: List[Dict[str, str]]):
-    """Usa Qwen-0.5B local para resumir el historial largo."""
-    if not history or len(history) < 1:
-        log("Iniciando Bibliotecario con historial corto/vacío")
-        return "No hay historial previo relevante."
-
-    # Resumimos lo anterior a los últimos 2 mensajes para mantener el hilo vivo
-    text_to_summarize = "\n".join(
-        [f"{m.get('role', 'user')}: {m.get('content', '')}" for m in history[:-2]]
-    )
-
-    prompt = (
-        f"Resume esta conversación técnica de forma muy concisa. "
-        f"Identifica explícitamente entidades clave (clases, funciones, archivos) mencionadas, "
-        f"errores y decisiones de código. Ignora saludos o charla trivial:\n\n"
-        f"{text_to_summarize}"
-    )
-
-    try:
-        res_json = call_llm_generic(
-            "generate",
-            LOCAL_MODEL_SUMMARIZER,
-            {"prompt": prompt},
-            timeout=15,
-        )
-        return res_json.get("response", "Sin resumen disponible.")
-    except Exception as e:
-        log(f"Error en Resumen Local: {e}")
-        return "Error al procesar la memoria previa."
-
-
-# --- 2. LÓGICA DE BÚSQUEDA (RAG) ---
-
-
-def get_query_vector(text: str):
-    """Genera embeddings usando el modelo local nomic."""
-    try:
-        data = call_llm_generic(
-            "embed",
-            "nomic-embed-text",
-            {"input": text},
-            timeout=10,
-        )
-        return data.get("embeddings", [None])[0] or data.get("embedding")
-    except Exception as e:
-        log(f"Error en Embed: {e}")
-        return None
-
-
-# --- 3. NUEVAS HERRAMIENTAS (PHASE 2) ---
-
-def get_project_structure(root_path: str = ".") -> str:
-    """Escanea el árbol de directorios ignorando carpetas irrelevantes."""
-    start_dir = os.path.join(PROJECT_ROOT, root_path)
-    if not os.path.exists(start_dir):
-        return f"Error: Path {start_dir} not found."
-    
-    structure = []
-    # Carpetas a ignorar explícitamente para evitar ruido/blobs enormes
-    ignored_folders = {"node_modules", "__pycache__", "venv", "data", "dist", "build", "out", ".git", ".github", ".vscode", ".next"}
-    
-    try:
-        for root, dirs, files in os.walk(start_dir):
-            # Ignore hidden and ignored folders
-            dirs[:] = [d for d in dirs if not d.startswith(".") and d not in ignored_folders]
-            
-            level = root.replace(start_dir, "").count(os.sep)
-            indent = " " * 4 * level
-            structure.append(f"{indent}{os.path.basename(root)}/")
-            subindent = " " * 4 * (level + 1)
-            for f in files:
-                if not f.startswith("."):
-                    structure.append(f"{subindent}{f}")
-                    
-        return "\n".join(structure)
-    except Exception as e:
-        return f"Error scanning structure: {e}"
-
-def verify_code_syntax(code: str, language: str) -> str:
-    """Usa el modelo local para validar sintaxis."""
-    prompt = (
-        f"Actua como un linter estricto. Analiza el siguiente codigo en {language} y detecta SOLO "
-        f"errores fatales de sintaxis. Si es valido, responde solo 'VALID'. "
-        f"Si hay error, responde 'ERROR: <descripcion breve>'. Código:\n\n{code}"
-    )
-    try:
-        res_json = call_llm_generic(
-            "generate",
-            LOCAL_MODEL_SUMMARIZER,
-            {"prompt": prompt},
-            timeout=10,
-        )
-        return res_json.get("response", "Error validation failed").strip()
-    except Exception as e:
-        return f"System Error: {e}"
-
-# --- 4. MANEJADORES MCP ---
-
-
-@mcp_server.list_tools()
-async def handle_list_tools() -> list[types.Tool]:
-    """Lista las herramientas disponibles con nombres cortos para modelos locales."""
-    return [
-        types.Tool(
-            name="search",
-            description=(
-                "SEARCH_CODE: Use this to search and analyze the codebase. "
-                "Takes 'query' (string). Use this for any technical question."
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "query": {"type": "string", "description": "The search query."}
-                },
-                "required": ["query"],
-            },
-        ),
-        types.Tool(
-            name="tree",
-            description=(
-                "GET_STRUCTURE: Use this to list the directory tree and find files. "
-                "Takes 'root_path' (string, default '.')."
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "root_path": {"type": "string", "description": "Folder to list.", "default": "."}
-                },
-            },
-        ),
-        types.Tool(
-            name="lint",
-            description=(
-                "VERIFY_SYNTAX: Use this to check if a code snippet has errors. "
-                "Takes 'code' and 'language'."
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "code": {"type": "string", "description": "Code snippet."},
-                    "language": {"type": "string", "description": "Language name."}
-                },
-                "required": ["code", "language"],
-            },
-        )
-    ]
-
-
-@mcp_server.call_tool()
-async def handle_call_tool(
-    name: str, arguments: dict | None
-) -> list[types.TextContent]:
-    if arguments is None:
-        arguments = {}
-    if name == "tree":
-        root_path = arguments.get("root_path", ".")
-        tree_out = get_project_structure(root_path)
-        return [types.TextContent(type="text", text=tree_out)]
-
-    elif name == "lint":
-        code = arguments.get("code", "")
-        language = arguments.get("language", "python")
-        result = verify_code_syntax(code, language)
-        return [types.TextContent(type="text", text=result)]
-
-    elif name == "search":
-        query = arguments.get("query")
-        # history no longer strictly required in schema for search
-        history = arguments.get("history", [])
-        
-        with tracer.start_as_current_span("search_code") as span:
-            span.set_attribute("rag.query", query)
-
-            # PASO A: El Bibliotecario genera el resumen (Llamada al método 1)
-            summary_text = get_compressed_memory(history)
-
-            # PASO B: Búsqueda Vectorial
-            # PASO B: Búsqueda Vectorial Expandida (Phase 3)
-            variations = generate_search_variations(query)
-            span.set_attribute("rag.variations", str(variations))
-            
-            all_queries = [query] + variations
-            
-            hits_map = {}
-            for q_var in all_queries:
-                vec = get_query_vector(q_var)
-                if vec:
-                    res = qdrant.search(collection_name=COLLECTION_NAME, query_vector=vec, limit=5)
-                    for r in res:
-                        hits_map[r.id] = r # Deduplication by ID
-            
-            unique_results = list(hits_map.values())
-            
-            # PASO B.2: Reranking (Phase 3)
-            top_results = rerank_search_results(query, unique_results)[:4] # Top 4
-            span.set_attribute("rag.results_count", len(unique_results))
-
-            # PASO C: Formatear Contexto (Usando 'path' para coincidir con indexer.py)
-            code_snippets = []
-            # PASO C: Formatear Contexto
-            code_snippets = []
-            for res in top_results:
-                path = res.payload.get("path", "desconocido")
-                content = res.payload.get("content", "")
-                code_snippets.append(f"ARCHIVO: {path}\n```\n{content}\n```")
-
-            code_context = (
-                "\n\n".join(code_snippets) if code_snippets else "Sin resultados."
-            )
-
-            # PASO C.2: El Crítico Local (Evaluación de Suficiencia)
-            critic_prompt = (
-                f"Analiza si el siguiente contexto de código es suficiente para responder a la consulta: '{query}'. "
-                f"Contexto:\n{code_context[:2000]}...\n" # Truncar para no saturar contexto
-                f"Responde solo 'SUFFICIENT' o 'INSUFFICIENT' seguido de una explicacion de 1 linea."
-            )
-            critic_judgement = "SKIP (Error)"
-            try:
-                 res_json = call_llm_generic(
-                    "generate",
-                    LOCAL_MODEL_CRITIC,
-                    {"prompt": critic_prompt},
-                    timeout=15,
+# --- NEW BIBLIOTECARIO SERVER INTERACTION (Phase 2) ---
+async def call_bibliotecario_server(history: str, query: str, timeout=30) -> Dict[str, Any]:
+    """
+    Llama al servidor del Bibliotecario para resumir el historial e identificar entidades.
+    """
+    with tracer.start_as_current_span("call_bibliotecario_server") as span:
+        span.set_attribute("bibliotecario.server.host", BIBLIOTECARIO_SERVER_HOST)
+        span.set_attribute("history.length", len(history))
+        span.set_attribute("query.length", len(query))
+        try:
+            url = f"{BIBLIOTECARIO_SERVER_HOST}/summarize_and_identify/"
+            payload = {"history": history, "query": query}
+            async with httpx.AsyncClient() as client:
+                res = await client.post(url, json=payload, timeout=timeout)
+                res.raise_for_status()
+                response_data = res.json()
+            if "summary" in response_data and "entities" in response_data:
+                span.set_attribute(
+                    "bibliotecario.summary.length", len(response_data["summary"])
                 )
-                 if "error" in res_json:
-                     log(f"LLM Error (Critic): {res_json['error']}")
-                     critic_judgement = f"Error: {res_json['error']}"
-                 else:
-                     critic_judgement = res_json.get("response", "No judgment").strip()
-                     log(f"Crítico Local: {critic_judgement}")
-            except Exception as e:
-                log(f"Error Crítico: {e}")
+                span.set_attribute(
+                    "bibliotecario.entities.count", len(response_data["entities"])
+                )
+                return response_data
+            else:
+                raise ValueError(
+                    f"Invalid response from bibliotecario server: {response_data}"
+                )
+        except httpx.HTTPStatusError as e:
+            span.set_attribute("error", True)
+            span.set_attribute("error.message", str(e))
+            log(f"Error calling bibliotecario server: {e}")
+            raise
+        except Exception as e:
+            span.set_attribute("error", True)
+            span.set_attribute("error.message", str(e))
+            log(f"Unexpected error in call_bibliotecario_server: {e}")
+            raise
 
 
-        # PASO D: El "Super-Prompt" para el modelo remoto
-        final_prompt = (
-            f"### RESUMEN DE LA CONVERSACIÓN PREVIA\n{summary_text}\n\n"
-            f"### EVALUACIÓN DEL CRÍTICO LOCAL\n{critic_judgement}\n\n"
-            f"### CONTEXTO DE CÓDIGO RELEVANTE\n{code_context}\n\n"
-            f"### CONSULTA ACTUAL\n{query}"
+async def generate_search_variations(query: str, timeout=30) -> List[str]:
+    """
+    Genera variaciones de la query para expansión, utilizando el servidor del Bibliotecario.
+    """
+    with tracer.start_as_current_span("generate_search_variations") as span:
+        span.set_attribute("query.original", query)
+        prompt = (
+            f"Eres un experto en búsqueda de código. Genera 3 variaciones de búsqueda "
+            f"técnica breves y pertinentes para la siguiente consulta: '{query}'. "
+            f"Responde solo las 3 frases separadas por una nueva línea, sin enumerar ni añadir prefijos."
         )
+        try:
+            # Aunque bibliotecario es para resumen, podemos usarlo para generación de texto
+            # encuadrando el prompt de forma adecuada.
+            # El endpoint /summarize_and_identify/ espera 'history' y 'query'.
+            # Usaremos un historial vacío y el prompt como la query.
+            bibliotecario_response = await call_bibliotecario_server(
+                history="", query=prompt, timeout=timeout
+            )
+            # La respuesta estará en el campo 'summary' para este tipo de prompt.
+            raw_response = bibliotecario_response.get("summary", "").strip()
+            lines = raw_response.split("\n")  # Split by actual newline character
+            variations = [l.strip().strip("- ") for l in lines if l.strip()]
+            span.set_attribute("variations.count", len(variations))
+            span.set_attribute("variations.list", json.dumps(variations))
+            return variations[:3]  # Devolver hasta 3 variaciones
+        except Exception as e:
+            span.set_attribute("error", True)
+            span.set_attribute("error.message", str(e))
+            log(f"Error generando variaciones de búsqueda con el Bibliotecario: {e}")
+            return []
 
-        return [types.TextContent(type="text", text=final_prompt)]
+
+async def call_critic_server(
+    query: str, documents: List[Dict[str, Any]], top_n: int = 3, timeout=30
+) -> List[Dict[str, Any]]:
+    """
+    Llama al servidor del Crítico Local para rerankear documentos.
+    """
+    with tracer.start_as_current_span("call_critic_server_for_rerank") as span:
+        span.set_attribute("critic.server.host", CRITIC_SERVER_HOST)
+        span.set_attribute("rerank.query", query)
+        span.set_attribute("rerank.documents_count", len(documents))
+        span.set_attribute("rerank.top_n", top_n)
+        try:
+            url = f"{CRITIC_SERVER_HOST}/rerank/"
+            payload = {"query": query, "documents": documents, "top_n": top_n}
+            async with httpx.AsyncClient() as client:
+                res = await client.post(url, json=payload, timeout=timeout)
+                res.raise_for_status()
+                response_data = res.json()
+            if "reranked_documents" in response_data and isinstance(
+                response_data["reranked_documents"], list
+            ):
+                span.set_attribute(
+                    "rerank.reranked_count", len(response_data["reranked_documents"])
+                )
+                return response_data["reranked_documents"]
+            else:
+                raise ValueError(
+                    f"Invalid rerank response from critic server: {response_data}"
+                )
+        except httpx.HTTPStatusError as e:
+            span.set_attribute("error", True)
+            span.set_attribute("error.message", str(e))
+            log(f"Error calling critic server for reranking: {e}")
+            raise
+        except Exception as e:
+            span.set_attribute("error", True)
+            span.set_attribute("error.message", str(e))
+            log(f"Unexpected error in call_critic_server: {e}")
+            raise
 
 
-# --- 4. SERVIDOR ASGI ---
 
 
-async def handle_sse(request):
-    async with sse.connect_sse(request.scope, request.receive, request._send) as (
-        rs,
-        ws,
-    ):
-        await mcp_server.run(
-            rs,
-            ws,
-            InitializationOptions(
-                server_name="mcp-rag-sse",
-                server_version="1.0.0",
-                capabilities=types.ServerCapabilities(
-                    tools=types.ToolsCapability(listChanged=True)
+
+def get_compressed_memory(history: List[types.ChatMessage]) -> str:
+    """
+    Refactorizado para usar el servidor del Bibliotecario.
+    Resume el historial de chat e identifica entidades clave.
+    """
+    with tracer.start_as_current_span("get_compressed_memory") as span:
+        full_history_text = "\n".join([f"{m.role}: {m.content}" for m in history])
+        last_query = history[-1].content if history else ""
+
+        try:
+            bibliotecario_response = call_bibliotecario_server(
+                full_history_text, last_query
+            )
+            summary = bibliotecario_response["summary"]
+            entities = bibliotecario_response["entities"]
+
+            span.set_attribute("compressed_memory.summary_length", len(summary))
+            span.set_attribute("compressed_memory.entities", json.dumps(entities))
+
+            # Puedes formatear la salida como consideres mejor para el LLM remoto
+            formatted_output = f"Resumen del historial de conversación:\n{summary}\nEntidades clave identificadas: {', '.join(entities)}"
+            return formatted_output
+        except Exception as e:
+            span.set_attribute("error", True)
+            span.set_attribute("error.message", str(e))
+            log(f"Error en get_compressed_memory al llamar al Bibliotecario: {e}")
+            return "No se pudo generar un resumen del historial."
+
+
+def get_query_vector(query: str, timeout=30) -> List[float]:
+    """
+    Obtiene el vector de embedding para una consulta, utilizando el servidor de embeddings dedicado.
+    Implementa 'Query Expansion' usando el Bibliotecario y devuelve un promedio de los embeddings.
+    """
+    with tracer.start_as_current_span("get_query_vector") as span:
+        span.set_attribute("query.original", query)
+        all_queries_to_embed = [query]
+        try:
+            # Generar variaciones de la query (Query Expansion)
+            variations = generate_search_variations(query, timeout=timeout)
+            if variations:
+                all_queries_to_embed.extend(variations)
+            span.set_attribute(
+                "query.expanded_queries_count", len(all_queries_to_embed)
+            )
+            span.set_attribute(
+                "query.expanded_queries", json.dumps(all_queries_to_embed)
+            )
+
+            # Obtener embeddings para todas las queries
+            all_embeddings = get_embedding_from_server(
+                texts=all_queries_to_embed, timeout=timeout
+            )
+
+            if not all_embeddings:
+                raise ValueError("No embeddings returned for the queries.")
+
+            # Calcular el promedio de los embeddings
+            # Asegurarse de que todos los embeddings tienen el mismo tamaño
+            if not all(len(e) == len(all_embeddings[0]) for e in all_embeddings):
+                log(
+                    "Advertencia: Embeddings con tamaños inconsistentes. Usando solo el primero."
+                )
+                span.set_attribute("error", True)
+                span.set_attribute(
+                    "error.message", "Embeddings con tamaños inconsistentes."
+                )
+                return all_embeddings[0]
+
+            avg_embedding = [
+                sum(dim_values) / len(dim_values) for dim_values in zip(*all_embeddings)
+            ]
+
+            span.set_attribute("query.embedding_size", len(avg_embedding))
+            return avg_embedding
+
+        except Exception as e:
+            span.set_attribute("error", True)
+            span.set_attribute("error.message", str(e))
+            log(f"Error obteniendo vector de query con expansión: {e}")
+            raise
+
+
+def get_project_structure(root_path: Path) -> str:
+    """
+    Escáner de sistema de archivos para entregar al LLM remoto un mapa del árbol de directorios antes de la búsqueda.
+    """
+    with tracer.start_as_current_span("get_project_structure") as span:
+        tree = []
+        for dirpath, dirnames, filenames in os.walk(root_path):
+            # Ignorar directorios no deseados
+            dirnames[:] = [
+                d
+                for d in dirnames
+                if not d.startswith(".")
+                and d
+                not in [
+                    "node_modules",
+                    "data",
+                    "venv",
+                    "dist",
+                    "build",
+                    "out",
+                    "gen",
+                    "test_results",
+                ]
+            ]
+
+            level = dirpath.replace(str(root_path), "").count(os.sep)
+            indent = " " * 4 * (level)
+            tree.append(f"{indent}{os.path.basename(dirpath)}/")
+            subindent = " " * 4 * (level + 1)
+            for f in filenames:
+                if not f.startswith("."):  # Ignorar archivos ocultos
+                    tree.append(f"{subindent}{f}")
+
+        result = "\\n".join(tree)
+        span.set_attribute("project.structure.length", len(result))
+        return result
+
+
+
+
+
+async def search_code(
+    query: str, limit: int = 5, use_reranker: bool = False
+) -> List[Dict[str, Any]]:
+    """
+    Busca fragmentos de código relevantes en Qdrant.
+    Incorpora Query Expansion y Reranking en fases posteriores.
+    """
+    with tracer.start_as_current_span("search_code") as span:
+        span.set_attribute("search.query", query)
+        span.set_attribute("search.limit", limit)
+        span.set_attribute("search.use_reranker", use_reranker)
+
+        try:
+            query_vector = get_query_vector(query)
+
+            # Obtener más resultados si se va a rerankear
+            qdrant_limit = limit * (
+                3 if use_reranker else 1
+            )  # Aumentamos el límite para el reranker
+            span.set_attribute("search.qdrant_limit", qdrant_limit)
+
+            search_result = qdrant.search(
+                collection_name=COLLECTION_NAME,
+                query_vector=query_vector,
+                limit=qdrant_limit,
+                with_payload=True,
+            )
+
+            raw_results = []
+            for hit in search_result:
+                raw_results.append(
+                    {
+                        "content": hit.payload.get("content"),
+                        "path": hit.payload.get("path"),
+                        "extension": hit.payload.get("extension"),
+                        "score": hit.score,
+                        "imports": hit.payload.get("imports"),
+                        "signatures": hit.payload.get("signatures"),
+                    }
+                )
+
+            span.set_attribute("search.qdrant_hits_initial", len(raw_results))
+
+            if use_reranker and raw_results:
+                log(
+                    f"Realizando reranking de {len(raw_results)} resultados con el Crítico Local..."
+                )
+                try:
+                    reranked_docs = call_critic_server(query, raw_results, top_n=limit)
+                    span.set_attribute("search.reranked_hits_count", len(reranked_docs))
+                    return reranked_docs
+                except Exception as rerank_e:
+                    span.set_attribute("error", True)
+                    span.set_attribute("error.message", f"Reranking failed: {rerank_e}")
+                    log(
+                        f"Error durante el reranking: {rerank_e}. Volviendo a los resultados brutos."
+                    )
+                    return raw_results[:limit]  # Fallback a resultados brutos
+
+            return raw_results[
+                :limit
+            ]  # Devolver solo el límite si no hay reranker o si falla
+
+        except Exception as e:
+            span.set_attribute("error", True)
+            span.set_attribute("error.message", str(e))
+            log(f"Error en search_code: {e}")
+            return []
+
+
+# --- HERRAMIENTAS MCP ---
+TOOLS = [
+    types.Tool(
+        id="search_code",
+        name="search_code",
+        description="Busca fragmentos de código relevantes de la base de código. Útil para encontrar ejemplos de implementación, definiciones o lógica relacionada con una consulta.",
+        parameters=types.Parameters(
+            properties={
+                "query": types.Parameter(
+                    type="string",
+                    description="La consulta de búsqueda para encontrar fragmentos de código.",
                 ),
-            ),
-        )
-    return Response()
+                "limit": types.Parameter(
+                    type="integer",
+                    description="Número máximo de fragmentos de código a devolver (por defecto 5).",
+                ),
+            },
+            required=["query"],
+        ),
+    ),
+    types.Tool(
+        id="get_project_structure",
+        name="get_project_structure",
+        description="Obtiene el mapa del árbol de directorios del proyecto. Útil para entender la organización del código antes de realizar búsquedas más específicas.",
+        parameters=types.Parameters(
+            properties={},
+            required=[],
+        ),
+    ),
+]
+
+# --- MANEJADORES MCP ---
 
 
+async def handle_list_tools(
+    request: types.ListToolsRequest, context: types.UserContext
+) -> types.ListToolsResponse:
+    with tracer.start_as_current_span("handle_list_tools") as span:
+        log(f"ListTools Request: {request.json()}")
+        return types.ListToolsResponse(tools=TOOLS)
+
+
+async def handle_call_tool(
+    request: types.CallToolRequest, context: types.UserContext
+) -> types.CallToolResponse:
+    with tracer.start_as_current_span("handle_call_tool") as span:
+        span.set_attribute("tool.id", request.tool_id)
+        span.set_attribute("tool.parameters", json.dumps(request.parameters))
+        log(f"CallTool Request: {request.json()}")
+
+        tool_id = request.tool_id
+        parameters = request.parameters
+
+        # Aquí se implementaría la lógica del Crítico Local para evaluar el contexto
+        # antes de ejecutar la herramienta, si fuera necesario.
+        # Por ahora, las herramientas se ejecutan directamente.
+
+        if tool_id == "search_code":
+            query = parameters.get("query")
+            limit = parameters.get("limit", 5)
+            if not query:
+                return types.CallToolResponse(
+                    error="Parámetro 'query' es requerido para search_code."
+                )
+            results = await search_code(query, limit)
+            return types.CallToolResponse(output=json.dumps(results))
+
+        elif tool_id == "get_project_structure":
+            project_structure = get_project_structure(Path(PROJECT_ROOT))
+            return types.CallToolResponse(output=project_structure)
+
+        else:
+            span.set_attribute("error", True)
+            span.set_attribute("error.message", f"Herramienta no encontrada: {tool_id}")
+            return types.CallToolResponse(error=f"Herramienta no encontrada: {tool_id}")
+
+
+async def handle_sse(request: Request) -> Response:
+    with tracer.start_as_current_span("handle_sse_connection"):
+        return await sse.handle_request(request)
+
+
+# El servidor MCP es un servidor SSE. Para que el agente pueda comunicarse en ambos sentidos, necesitamos
+# capturar las peticiones POST y pasárselas al mcp_server.
+# Sin embargo, Starlette también tiene que interceptar las peticiones GET para servir el cliente SSE.
+# Esto se hace envolviendo el "receive" original con un "new_receive".
 async def logged_sse_app(scope, receive, send):
-    if scope["type"] == "http" and scope["method"] == "POST":
-        body = b""
-        more_body = True
-        while more_body:
-            msg = await receive()
-            if msg["type"] == "http.request":
-                body += msg.get("body", b"")
-                more_body = msg.get("more_body", False)
+    async def new_receive():
+        message = await receive()
+        log(f"Received from client: {message.get('type')}")
+        return message
 
-        async def new_receive():
-            return {"type": "http.request", "body": body, "more_body": False}
-
-        await sse.handle_post_message(scope, new_receive, send)
-    else:
-        await sse.handle_post_message(scope, receive, send)
+    await mcp_server.handle_request(scope, new_receive, send)
 
 
-app = Starlette(
-    routes=[
-        Route("/sse", endpoint=handle_sse, methods=["GET", "POST"]),
-        Route("/messages", endpoint=logged_sse_app, methods=["POST"]),
-    ],
-    middleware=[
-        Middleware(
-            CORSMiddleware,
-            allow_origins=["*"],
-            allow_methods=["*"],
-            allow_headers=["*"],
-        )
-    ],
-)
+# --- SERVIDOR HTTP ---
+
+
+routes = [
+    Route("/", logged_sse_app, methods=["GET", "POST", "PUT", "DELETE"]),
+    Mount("/messages", app=sse.app, name="messages"),
+]
+
+middleware = [
+    Middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_methods=["*"],
+        allow_headers=["*"],
+        allow_credentials=True,
+    )
+]
+
+app = Starlette(routes=routes, middleware=middleware)
 
 if __name__ == "__main__":
-    log(f"📡 Servidor MCP RAG iniciado en puerto 8002. Modo LLM: {LLM_API_TYPE}")
+    # Registrar los manejadores de herramientas en el servidor MCP
+    mcp_server.on_list_tools_request(handle_list_tools)
+    mcp_server.on_call_tool_request(handle_call_tool)
+
+    # El punto de entrada del LLM es el endpoint de chat de nuestro MCP.
+    # Cuando se recibe un mensaje de chat, el MCP lo pasa al LLM remoto.
+    @mcp_server.on_chat_completion_request
+    async def on_chat_completion_request(
+        request: types.ChatCompletionRequest, context: types.UserContext
+    ) -> types.ChatCompletionResponse:
+        with tracer.start_as_current_span("on_chat_completion_request") as span:
+            span.set_attribute("chat.request.model", request.model)
+            span.set_attribute("chat.request.messages_count", len(request.messages))
+            log(f"ChatCompletion Request: {request.json()}")
+
+            # 1. Obtener memoria comprimida usando El Bibliotecario
+            compressed_memory = get_compressed_memory(
+                request.messages[:-1]
+            )  # Excluir el último mensaje (la query actual)
+            current_query = request.messages[-1].content
+
+            span.set_attribute("chat.compressed_memory", compressed_memory)
+            span.set_attribute("chat.current_query", current_query)
+
+            # 2. Generar el prompt final para el LLM remoto
+            # Este prompt debe incluir el contexto relevante, herramientas, etc.
+            system_prompt = f"""
+Eres un asistente de codificación experto. Tu tarea es ayudar al usuario a entender y modificar el código.
+Utiliza las herramientas disponibles para buscar información relevante en la base de código.
+Considera el historial de la conversación y el resumen proporcionado para entender el contexto.
+
+Historial de conversación resumido:
+{compressed_memory}
+
+Estructura del proyecto (si es relevante, puedes obtenerla con get_project_structure):
+{get_project_structure(Path(PROJECT_ROOT))}
+
+Herramientas disponibles:
+{json.dumps([t.dict() for t in TOOLS])}
+
+Responde de forma concisa y útil. Si se te pide generar código, asegúrate de que sea correcto y relevante.
+"""
+
+            # Construir mensajes para el LLM remoto
+            # El sistema debe ser el primer mensaje. Los mensajes de usuario/asistente deben seguir.
+            llm_messages = [{"role": "system", "content": system_prompt}]
+            # Añadir mensajes del historial, excluyendo el último (ya manejado como current_query)
+            llm_messages.extend(
+                [{"role": m.role, "content": m.content} for m in request.messages[:-1]]
+            )
+            # Añadir la query actual
+            llm_messages.append({"role": "user", "content": current_query})
+
+            extra_params = {}
+            if request.temperature is not None:
+                extra_params["temperature"] = request.temperature
+            if request.max_tokens is not None:
+                extra_params["max_tokens"] = request.max_tokens
+
+            try:
+                # Usar El Sabio para la respuesta final al usuario
+                llm_response_content = sabio.chat(
+                    messages=llm_messages,
+                    timeout=120,
+                    **extra_params,
+                )
+
+                span.set_attribute(
+                    "chat.llm_response_content_length", len(llm_response_content)
+                )
+
+                return types.ChatCompletionResponse(
+                    id="chatcmpl-" + str(uuid.uuid4()),
+                    choices=[
+                        types.Choice(
+                            delta=types.ChatMessage(
+                                role="assistant", content=llm_response_content
+                            ),
+                            finish_reason="stop",
+                        )
+                    ],
+                    model=sabio.model,
+                    object="chat.completion",
+                    created=int(time.time()),
+                )
+
+            except Exception as e:
+                span.set_attribute("error", True)
+                span.set_attribute("error.message", str(e))
+                log(f"Error al llamar al LLM remoto: {e}")
+                return types.ChatCompletionResponse(
+                    id="error",
+                    choices=[
+                        types.Choice(
+                            delta=types.ChatMessage(
+                                role="assistant",
+                                content=f"Error interno al procesar tu solicitud: {e}",
+                            ),
+                            finish_reason="stop",
+                        )
+                    ],
+                )
+
+    # Iniciar el servidor Uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8002)

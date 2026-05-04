@@ -14,16 +14,16 @@ services:
         reservations:
           devices:
             - driver: nvidia
-              device_ids: ["1"]
-              capabilities: [gpu]
+              device_ids: [ "1" ]
+              capabilities: [ gpu ]
     healthcheck:
-      test: ["CMD", "bash", "-c", "</dev/tcp/localhost/6333"]
+      test: [ "CMD", "bash", "-c", "</dev/tcp/localhost/6333" ]
       interval: 10s
       timeout: 5s
       retries: 5
     volumes:
       - ./data/qdrant:/qdrant/storage
-    networks: ["rag_network"]
+    networks: [ "rag_network" ]
 
   rag_phoenix:
     image: arizephoenix/phoenix:nightly
@@ -36,19 +36,13 @@ services:
       - PHOENIX_HOST=0.0.0.0
       - PHOENIX_GRPC_HOST=0.0.0.0
     healthcheck:
-      test:
-        [
-          "CMD",
-          "python3",
-          "-c",
-          "import socket; s = socket.socket(); s.connect(('localhost', 6006))",
-        ]
+      test: [ "CMD", "python3", "-c", "import socket; s = socket.socket(); s.connect(('localhost', 6006))" ]
       interval: 10s
       timeout: 5s
       retries: 5
     volumes:
       - ./data/phoenix:/root/.phoenix
-    networks: ["rag_network"]
+    networks: [ "rag_network" ]
 
   rag_ollama:
     build: ./ollama-local
@@ -57,18 +51,18 @@ services:
     deploy:
       resources:
         reservations:
-          devices: [{ driver: nvidia, device_ids: ["1"], capabilities: [gpu] }]
+          devices: [ { driver: nvidia, device_ids: [ "1" ], capabilities: [ gpu ] } ]
     ports:
       - 11434:11434
     volumes:
       - ./data/ollama:/root/.ollama
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:11434/api/tags"]
+      test: [ "CMD", "curl", "-f", "http://localhost:11434/api/tags" ]
       interval: 10s
       timeout: 5s
       retries: 10
       start_period: 30s
-    networks: ["rag_network"]
+    networks: [ "rag_network" ]
 
   tabby:
     restart: always
@@ -84,15 +78,15 @@ services:
         reservations:
           devices:
             - driver: nvidia
-              device_ids: ["1"]
-              capabilities: [gpu]
+              device_ids: [ "1" ]
+              capabilities: [ gpu ]
 
   rag-indexer:
     build: ./indexer
     container_name: rag_indexer
     environment:
-      - OLLAMA_HOST=http://rag_ollama:11434
-      - PHOENIX_ENDPOINT=http://rag_phoenix:6006/v1/traces
+      - EMBEDDING_SERVER_HOST=http://rag_embedding_server:8000
+      - PHOENIX_ENDPOINT=http://rag_phoenix:4318/v1/traces
     command: python3 -u indexer.py
     volumes:
       - /home/maxi/Documentos/source/codecrypto/practice:/app/code
@@ -103,17 +97,22 @@ services:
         condition: service_healthy
       rag_phoenix:
         condition: service_healthy
-    networks: ["rag_network"]
+    networks: [ "rag_network" ]
 
   rag-mcp-server:
     build: ./mcp-bridge
     container_name: rag-mcp
     environment:
-      - OLLAMA_HOST=http://rag_ollama:11434 # <--- ESTO ES LO QUE FALTA
-      - QDRANT_HOST=rag_qdrant # <--- TAMBIÉN AJUSTA ESTO SI ES NECESARIO
-      - PHOENIX_ENDPOINT=http://rag_phoenix:6006/v1/traces
-      #- PHOENIX_API_KEY=
+      # --- El Bibliotecario (infraestructura RAG) ---
+      - QDRANT_HOST=rag_qdrant
+      - PHOENIX_ENDPOINT=http://rag_phoenix:4318/v1/traces
       - PROJECT_ROOT=/app/code
+      # --- El Sabio — apuntando a Ollama en este compose ---
+      # Para cambiar de LLM ver mcp-bridge/sabio_configs/*.env
+      - SABIO_BASE_URL=http://rag_ollama:11434
+      - SABIO_MODEL=qwen2.5:0.5b
+      - SABIO_API_KEY=none
+      - SABIO_TIMEOUT=30
     command: python3 -u main.py
     volumes:
       - /home/maxi/Documentos/source/codecrypto/practice:/app/code
@@ -127,7 +126,7 @@ services:
         condition: service_healthy
     ports:
       - 8002:8002
-    networks: ["rag_network"]
+    networks: [ "rag_network" ]
 
 networks:
   rag_network:

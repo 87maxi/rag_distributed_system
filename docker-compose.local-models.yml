@@ -1,0 +1,64 @@
+services:
+  rag_embedding_server:
+    build: ./embedding_server
+    container_name: rag_embedding_server
+    ports:
+      - "8000:8000"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["0"] # Asignar a la GPU local (GTX 1650)
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    networks: ["rag_network"]
+
+  rag_bibliotecario:
+    build: ./bibliotecario_server
+    container_name: rag_bibliotecario
+    ports:
+      - "8001:8001"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["0"] # Compartiendo con embedding_server
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s # Puede tomar más tiempo para cargar el LLM
+    networks: ["rag_network"]
+
+  rag_critic_server:
+    build: ./critic_server
+    container_name: rag_critic_server
+    ports:
+      - "8002:8002"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["0"] # Compartiendo con embedding_server y bibliotecario
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8002/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s # Puede tomar más tiempo para cargar el LLM
+    networks: ["rag_network"]
+
+networks:
+  rag_network:
+    driver: bridge
